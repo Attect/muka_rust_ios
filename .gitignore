@@ -1,0 +1,20 @@
+/target/
+/.idea/
+/.vscode/
+# 开发工具目录（本地配置，不进入仓库）
+/.codex/
+/.agents/
+/.cargo/
+*.log
+*.pid
+*.tmp
+.DS_Store
+Thumbs.db
+/runtime/
+/supervision-cert.der
+/supervision-cert.pem
+/supervision-private-key.key
+/supervision-private-key.pem
+/supervision-csr.csr
+/supervision-identity.p12
+/selfIdentity.plist

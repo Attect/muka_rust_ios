@@ -1,0 +1,175 @@
+[package]
+name = "ios-core"
+description = "High-level device API, pairing transport, and discovery for iOS devices"
+readme = "README.md"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[features]
+default = []
+classic = [
+    "afc",
+    "apps",
+    "crashreport",
+    "diagnostics",
+    "file_relay",
+    "heartbeat",
+    "house_arrest",
+    "installation",
+    "mcinstall",
+    "mobileactivation",
+    "notificationproxy",
+    "profiles",
+    "screenshot",
+    "springboard",
+    "syslog",
+]
+developer = [
+    "accessibility_audit",
+    "amfi",
+    "debugserver",
+    "dproxy",
+    "dtx",
+    "fetchsymbols",
+    "imagemounter",
+    "instruments",
+    "pcap",
+    "testmanager",
+    "webinspector",
+]
+management = [
+    "arbitration",
+    "companion",
+    "idam",
+    "misagent",
+    "power_assertion",
+    "preboard",
+    "prepare",
+    "restore",
+]
+ios17 = [
+    "apps",
+    "deviceinfo",
+    "diagnosticsservice",
+    "dproxy",
+    "fileservice",
+    "instruments",
+    "testmanager",
+    "mdns",
+    "tunnel-userspace",
+]
+mdns = ["dep:mdns-sd"]
+tunnel = ["dep:openssl", "dep:tokio-openssl"]
+tunnel-kernel = ["tunnel", "dep:tun-rs"]
+tunnel-userspace = ["tunnel", "dep:smoltcp"]
+supervised-pair = ["dep:openssl"]
+afc = []
+arbitration = []
+apps = ["dep:crc32fast", "dep:zip"]
+companion = []
+notificationproxy = []
+crashreport = ["afc"]
+diagnostics = []
+diagnosticsservice = ["tunnel", "mdns"]
+springboard = []
+mcinstall = []
+mobileactivation = []
+profiles = ["mcinstall", "misagent"]
+heartbeat = []
+file_relay = []
+house_arrest = ["afc"]
+installation = ["apps"]
+syslog = []
+screenshot = []
+misagent = []
+amfi = []
+dtx = ["lz4_flex"]
+instruments = ["dtx"]
+testmanager = ["dtx"]
+accessibility_audit = ["dtx"]
+debugserver = []
+fileservice = []
+deviceinfo = []
+imagemounter = ["dep:reqwest", "dep:zip"]
+pcap = []
+power_assertion = []
+preboard = []
+idam = []
+fetchsymbols = []
+ostrace = []
+prepare = ["afc", "mcinstall", "supervised-pair"]
+restore = []
+dproxy = ["dtx"]
+webinspector = []
+full = [
+    "classic",
+    "developer",
+    "ios17",
+    "management",
+    "ostrace",
+    "supervised-pair",
+    "tunnel-kernel",
+]
+
+[dependencies]
+tokio        = { workspace = true, features = ["fs", "io-util", "macros", "net", "rt", "sync", "time"] }
+bytes        = { workspace = true }
+zerocopy     = { workspace = true }
+thiserror    = { workspace = true }
+anyhow       = { workspace = true }
+tracing      = { workspace = true }
+tokio-util   = { workspace = true }
+tokio-stream = { workspace = true }
+semver       = { workspace = true }
+mdns-sd      = { workspace = true, optional = true }
+plist        = { workspace = true }
+futures-core = { workspace = true }
+futures-util = { workspace = true }
+rustls       = { workspace = true }
+tokio-rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
+async-stream = { workspace = true }
+serde        = { workspace = true }
+serde_json   = { workspace = true }
+serde_bytes  = { workspace = true }
+indexmap     = { workspace = true }
+dirs-next    = { workspace = true }
+chacha20poly1305 = { workspace = true }
+base64       = { workspace = true }
+hex          = { workspace = true }
+x25519-dalek = { workspace = true }
+ed25519-dalek = { workspace = true }
+rand         = { workspace = true }
+md5          = { workspace = true }
+openssl      = { workspace = true, optional = true }
+tokio-openssl = { workspace = true, optional = true }
+h2           = { workspace = true }
+http         = { workspace = true }
+smoltcp      = { workspace = true, optional = true }
+tun-rs       = { workspace = true, optional = true }
+p256         = { workspace = true }
+sha2         = { workspace = true }
+hkdf         = { workspace = true }
+zeroize      = { workspace = true }
+num-bigint   = { workspace = true }
+num-traits   = { workspace = true }
+uuid         = { workspace = true }
+quick-xml    = { workspace = true }
+time         = { workspace = true }
+lz4_flex     = { workspace = true, optional = true }
+reqwest      = { workspace = true, optional = true }
+zip          = { workspace = true, optional = true }
+crc32fast    = { workspace = true, optional = true }
+
+[target.'cfg(unix)'.dependencies]
+libc         = { workspace = true }
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]

@@ -1,0 +1,384 @@
+{
+  "name": "basic-ios-18",
+  "devices": [
+    {
+      "device_id": 1,
+      "udid": "replay-phone",
+      "connection_type": "usb",
+      "properties": {
+        "ConnectionType": "USB",
+        "ProductVersion": "18.0"
+      }
+    }
+  ],
+  "buid": "REPLAY-BUID-0001",
+  "pair_records": {
+    "replay-phone": {
+      "HostID": "replay-host",
+      "SystemBUID": "REPLAY-BUID-0001"
+    }
+  },
+  "commands": [
+    {
+      "argv": [
+        "info"
+      ],
+      "result": {
+        "exit_code": 0,
+        "value": {
+          "DeviceName": "Replay iPhone",
+          "ProductType": "iPhone17,1",
+          "ProductVersion": "18.0",
+          "UniqueDeviceID": "replay-phone"
+        },
+        "warnings": []
+      }
+    },
+    {
+      "argv": [
+        "lang"
+      ],
+      "result": {
+        "exit_code": 0,
+        "value": {
+          "Language": "en",
+          "Locale": "en_US",
+          "SupportedLocales": ["en_US", "zh_CN"],
+          "SupportedLanguages": ["en", "zh-Hans"]
+        },
+        "warnings": []
+      }
+    },
+    {
+      "argv": [
+        "ip"
+      ],
+      "result": {
+        "exit_code": 0,
+        "value": {
+          "Mac": "02:00:00:00:00:01",
+          "IPv4": "192.0.2.10",
+          "IPv6": "2001:db8::10"
+        },
+        "warnings": []
+      }
+    },
+    {
+      "argv": [
+        "devicestate",
+        "list"
+      ],
+      "result": {
+        "exit_code": 0,
+        "value": [
+          {
+            "Identifier": "SlowNetworkCondition",
+            "Profiles": [
+              {
+                "Identifier": "SlowNetwork3GGood",
+                "Description": "Replay 3G network condition"
+              }
+            ]
+          }
+        ],
+        "warnings": []
+      }
+    },
+    {
+      "argv": [
+        "prepare",
+        "cloudconfig"
+      ],
+      "result": {
+        "exit_code": 0,
+        "value": {
+          "Status": "Acknowledged",
+          "IsSupervised": true,
+          "OrganizationName": "Replay Lab",
+          "CloudConfigurationIsComplete": true
+        },
+        "warnings": []
+      }
+    },
+    {
+      "argv": [
+        "prepare",
+        "printskip"
+      ],
+      "result": {
+        "exit_code": 0,
+        "value": [
+          "Accessibility",
+          "AppleID",
+          "WiFi"
+        ],
+        "warnings": []
+      }
+    },
+    {
+      "argv": [
+        "assistivetouch",
+        "get"
+      ],
+      "result": {
+        "exit_code": 0,
+        "value": {
+          "AssistiveTouchEnabled": false
+        },
+        "warnings": []
+      }
+    },
+    {
+      "argv": [
+        "voiceover",
+        "get"
+      ],
+      "result": {
+        "exit_code": 0,
+        "value": {
+          "VoiceOverTouchEnabled": false
+        },
+        "warnings": []
+      }
+    },
+    {
+      "argv": [
+        "zoom",
+        "get"
+      ],
+      "result": {
+        "exit_code": 0,
+        "value": {
+          "ZoomTouchEnabled": false
+        },
+        "warnings": []
+      }
+    },
+    {
+      "argv": [
+        "timeformat",
+        "get"
+      ],
+      "result": {
+        "exit_code": 0,
+        "value": {
+          "TimeFormat": "12h"
+        },
+        "warnings": []
+      }
+    },
+    {
+      "argv": [
+        "apps"
+      ],
+      "result": {
+        "exit_code": 0,
+        "value": {
+          "com.example.Replay": {
+            "CFBundleDisplayName": "Replay App",
+            "CFBundleShortVersionString": "1.0"
+          }
+        },
+        "warnings": []
+      }
+    },
+    {
+      "argv": [
+        "batterycheck"
+      ],
+      "result": {
+        "exit_code": 0,
+        "value": {
+          "BatteryCurrentCapacity": 80,
+          "BatteryIsCharging": false
+        },
+        "warnings": []
+      }
+    },
+    {
+      "argv": [
+        "diagnostics",
+        "list"
+      ],
+      "result": {
+        "exit_code": 0,
+        "value": {
+          "Diagnostics": {
+            "GasGauge": {
+              "CycleCount": 0,
+              "DesignCapacity": 0,
+              "FullChargeCapacity": 0,
+              "Status": "Success"
+            },
+            "HDMI": {
+              "Connection": "Inactive",
+              "Status": "Success"
+            },
+            "IORegistry": {
+              "AbsoluteCapacity": 0,
+              "AppleRawCurrentCapacity": 0,
+              "AppleRawMaxCapacity": 0,
+              "AtCriticalLevel": false,
+              "AtWarnLevel": false,
+              "CurrentCapacity": 0,
+              "CycleCount": 0,
+              "DesignCapacity": 0,
+              "InstantAmperage": 0,
+              "IsCharging": false,
+              "NominalChargeCapacity": 0,
+              "Temperature": 0,
+              "Voltage": 0
+            },
+            "NAND": {
+              "Status": "Success"
+            },
+            "WiFi": {
+              "Active": "",
+              "Status": "Success"
+            }
+          },
+          "Status": "Success"
+        },
+        "warnings": []
+      }
+    },
+    {
+      "argv": [
+        "diskspace"
+      ],
+      "result": {
+        "exit_code": 0,
+        "value": {
+          "Model": "ReplayFS",
+          "BlockSize": 4096,
+          "FreeBytes": 3000000000,
+          "UsedBytes": 1000000000,
+          "TotalBytes": 4000000000
+        },
+        "warnings": []
+      }
+    },
+    {
+      "argv": [
+        "fsync",
+        "tree",
+        "--path=/"
+      ],
+      "result": {
+        "exit_code": 0,
+        "value": {
+          "path": "/",
+          "entries": [
+            {
+              "path": "/",
+              "type": "S_IFDIR",
+              "size": 0,
+              "blocks": 0,
+              "linkTarget": null
+            }
+          ],
+          "count": 1
+        },
+        "warnings": []
+      }
+    },
+    {
+      "argv": [
+        "devmode",
+        "get"
+      ],
+      "result": {
+        "exit_code": 0,
+        "value": {
+          "DeveloperModeEnabled": true
+        },
+        "warnings": []
+      }
+    },
+    {
+      "argv": [
+        "ps"
+      ],
+      "result": {
+        "exit_code": 0,
+        "value": [
+          {
+            "pid": 42,
+            "name": "ReplayApp",
+            "realAppName": "ReplayApp",
+            "isApplication": true,
+            "startPageCount": 1
+          }
+        ],
+        "warnings": []
+      }
+    },
+    {
+      "argv": [
+        "profile",
+        "list"
+      ],
+      "result": {
+        "exit_code": 0,
+        "value": [],
+        "warnings": []
+      }
+    },
+    {
+      "argv": [
+        "crash",
+        "ls"
+      ],
+      "result": {
+        "exit_code": 0,
+        "value": {
+          "files": [],
+          "length": 0
+        },
+        "warnings": []
+      }
+    },
+    {
+      "argv": [
+        "webinspector",
+        "list"
+      ],
+      "result": {
+        "exit_code": 0,
+        "value": [
+          {
+            "application": {
+              "id": "PID:42",
+              "bundleId": "com.apple.mobilesafari",
+              "pid": 42,
+              "name": "Safari",
+              "automationAvailability": "WIRAutomationAvailabilityAvailable",
+              "active": true,
+              "proxy": false,
+              "ready": true
+            },
+            "page": {
+              "id": 7,
+              "key": "replay-page-1",
+              "type": "WIRTypeWebPage",
+              "url": "https://example.com/",
+              "title": "Replay Page"
+            }
+          }
+        ],
+        "warnings": []
+      }
+    },
+    {
+      "argv": [
+        "webinspector",
+        "eval"
+      ],
+      "result": {
+        "exit_code": 0,
+        "value": "Replay Page",
+        "warnings": []
+      }
+    }
+  ]
+}

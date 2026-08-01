@@ -1,0 +1,70 @@
+[package]
+name = "rust-ios-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[features]
+default = ["real-device"]
+real-device = [
+    "dep:chrono",
+    "dep:glob",
+    "dep:hex",
+    "dep:idevice",
+    "dep:mdns-sd",
+    "dep:ns-keyed-archive",
+    "dep:ios-device-core",
+    "dep:image",
+    "dep:rustls",
+    "dep:sha2",
+    "dep:tokio-rustls",
+    "dep:tun-rs",
+]
+
+[dependencies]
+apple-codesign.workspace = true
+async-trait.workspace = true
+base64.workspace = true
+bytes.workspace = true
+chrono = { workspace = true, optional = true }
+idevice = { workspace = true, optional = true }
+mdns-sd = { workspace = true, optional = true }
+ns-keyed-archive = { workspace = true, optional = true }
+ios-device-core = { workspace = true, optional = true }
+image = { workspace = true, optional = true }
+glob = { workspace = true, optional = true }
+hex = { workspace = true, optional = true }
+cryptographic-message-syntax.workspace = true
+p12-keystore.workspace = true
+p256.workspace = true
+percent-encoding.workspace = true
+plist.workspace = true
+rand_08.workspace = true
+reqwest.workspace = true
+rsa.workspace = true
+rustls = { workspace = true, optional = true }
+rust-ios-protocol = { path = "../rust-ios-protocol" }
+serde.workspace = true
+serde_json.workspace = true
+sha1.workspace = true
+sha2 = { workspace = true, optional = true }
+thiserror.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+tokio-rustls = { workspace = true, optional = true }
+tokio-util.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+x509-certificate.workspace = true
+zip.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+tun-rs = { workspace = true, optional = true }
+windows-sys = { version = "0.61.2", features = ["Win32_Storage_FileSystem"] }
+
+[dev-dependencies]
+axum.workspace = true
+cryptographic-message-syntax = { workspace = true, features = ["http"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "io-util"] }
+
