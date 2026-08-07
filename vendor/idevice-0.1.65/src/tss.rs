@@ -588,3 +588,120 @@ pub fn extract_img4_ticket(response: &plist::Dictionary) -> Result<Vec<u8>, Idev
         )),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn boolean(value: bool) -> plist::Value {
+        plist::Value::Boolean(value)
+    }
+
+    fn rule(conditions: plist::Dictionary, actions: plist::Dictionary) -> plist::Value {
+        plist::Value::Dictionary(plist::Dictionary::from_iter([
+            ("Conditions".to_owned(), plist::Value::Dictionary(conditions)),
+            ("Actions".to_owned(), plist::Value::Dictionary(actions)),
+        ]))
+    }
+
+    fn production_parameters() -> plist::Dictionary {
+        plist::Dictionary::from_iter([
+            ("ApProductionMode".to_owned(), boolean(true)),
+            ("ApSecurityMode".to_owned(), boolean(true)),
+            ("ApSupportsImg4".to_owned(), boolean(true)),
+        ])
+    }
+
+    #[test]
+    fn applies_actions_when_all_conditions_met() {
+        // go-ios TestApplyRestoreRequestRules: a matching rule must overwrite
+        // EPRO/ESEC from the input with the rule's action values.
+        let mut input = plist::Dictionary::from_iter([
+            ("EPRO".to_owned(), boolean(false)),
+            ("ESEC".to_owned(), boolean(false)),
+        ]);
+        let rules = vec![rule(
+            plist::Dictionary::from_iter([
+                ("ApCurrentProductionMode".to_owned(), boolean(true)),
+                ("ApRawSecurityMode".to_owned(), boolean(true)),
+                ("ApRequiresImage4".to_owned(), boolean(true)),
+            ]),
+            plist::Dictionary::from_iter([
+                ("EPRO".to_owned(), boolean(true)),
+                ("ESEC".to_owned(), boolean(true)),
+            ]),
+        )];
+        apply_restore_request_rules(&mut input, &production_parameters(), &rules);
+        assert_eq!(input.get("EPRO"), Some(&boolean(true)));
+        assert_eq!(input.get("ESEC"), Some(&boolean(true)));
+    }
+
+    #[test]
+    fn skips_rule_when_condition_value_differs() {
+        let mut input = plist::Dictionary::from_iter([("EPRO".to_owned(), boolean(false))]);
+        let rules = vec![rule(
+            plist::Dictionary::from_iter([(
+                "ApCurrentProductionMode".to_owned(),
+                boolean(false),
+            )]),
+            plist::Dictionary::from_iter([("EPRO".to_owned(), boolean(true))]),
+        )];
+        apply_restore_request_rules(&mut input, &production_parameters(), &rules);
+        assert_eq!(input.get("EPRO"), Some(&boolean(false)));
+    }
+
+    #[test]
+    fn skips_rule_on_unknown_condition_key() {
+        let mut input = plist::Dictionary::from_iter([("EPRO".to_owned(), boolean(false))]);
+        let rules = vec![rule(
+            plist::Dictionary::from_iter([("ApUnknownKey".to_owned(), boolean(true))]),
+            plist::Dictionary::from_iter([("EPRO".to_owned(), boolean(true))]),
+        )];
+        apply_restore_request_rules(&mut input, &production_parameters(), &rules);
+        assert_eq!(input.get("EPRO"), Some(&boolean(false)));
+    }
+
+    #[test]
+    fn skips_value_255_action() {
+        // 255 is the "ignore" sentinel and must not overwrite the input.
+        let mut input = plist::Dictionary::from_iter([("EPRO".to_owned(), boolean(false))]);
+        let rules = vec![rule(
+            plist::Dictionary::from_iter([(
+                "ApCurrentProductionMode".to_owned(),
+                boolean(true),
+            )]),
+            plist::Dictionary::from_iter([(
+                "EPRO".to_owned(),
+                plist::Value::Integer(255u64.into()),
+            )]),
+        )];
+        apply_restore_request_rules(&mut input, &production_parameters(), &rules);
+        assert_eq!(input.get("EPRO"), Some(&boolean(false)));
+    }
+
+    #[test]
+    fn skips_rules_without_conditions_or_actions() {
+        let mut input = plist::Dictionary::from_iter([("EPRO".to_owned(), boolean(false))]);
+        let rules = vec![
+            plist::Value::Dictionary(plist::Dictionary::new()),
+            plist::Value::String("not a dictionary".into()),
+        ];
+        apply_restore_request_rules(&mut input, &production_parameters(), &rules);
+        assert_eq!(input.get("EPRO"), Some(&boolean(false)));
+    }
+
+    #[test]
+    fn parse_hex_field_accepts_strings_and_integers() {
+        assert_eq!(
+            parse_hex_field(Some(&plist::Value::String("0x1F".into()))),
+            Some(31)
+        );
+        assert_eq!(
+            parse_hex_field(Some(&plist::Value::Integer(42u64.into()))),
+            Some(42)
+        );
+        assert_eq!(parse_hex_field(Some(&plist::Value::Boolean(true))), None);
+        assert_eq!(parse_hex_field(Some(&plist::Value::String("zz".into()))), None);
+        assert_eq!(parse_hex_field(None), None);
+    }
+}

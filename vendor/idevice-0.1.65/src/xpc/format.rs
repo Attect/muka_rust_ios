@@ -515,6 +515,10 @@ impl XPCMessage {
         let message_id = u64::from_le_bytes([
             data[16], data[17], data[18], data[19], data[20], data[21], data[22], data[23],
         ]);
+        // 注意：rust-ios 的 XPC body 直接承载 XPCObject 编码（空字典等控制帧
+        // 可小于 8 字节），不像 go-ios 那样包含 8 字节 body header；因此不能
+        // 套用 go-ios 的 BodyLen >= 8 检查。长度一致性由下面的越界检查和
+        // XPCObject::decode 内部边界保证。
         if body_len + 24 > data.len() as u64 {
             warn!(
                 "Body length is {body_len}, but received bytes is {}",

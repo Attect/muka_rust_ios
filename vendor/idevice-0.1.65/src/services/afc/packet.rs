@@ -76,6 +76,27 @@ impl AfcPacket {
     pub async fn read(reader: &mut Idevice) -> Result<Self, IdeviceError> {
         let header = AfcPacketHeader::read(reader).await?;
         debug!("afc header: {header:?}");
+        // Validate lengths before subtracting so malformed sizes cannot
+        // underflow into a huge allocation (go-ios v1.2.1 hardening).
+        if header.header_payload_len < AfcPacketHeader::LEN {
+            return Err(IdeviceError::UnexpectedResponse(format!(
+                "invalid AFC header payload length {} (minimum {})",
+                header.header_payload_len,
+                AfcPacketHeader::LEN
+            )));
+        }
+        if header.entire_len < header.header_payload_len {
+            return Err(IdeviceError::UnexpectedResponse(format!(
+                "invalid AFC packet lengths: entire_len {} < header_payload_len {}",
+                header.entire_len, header.header_payload_len
+            )));
+        }
+        if header.entire_len > 1024 * 1024 * 1024 {
+            return Err(IdeviceError::UnexpectedResponse(format!(
+                "AFC packet too large: {} bytes (limit 1 GiB)",
+                header.entire_len
+            )));
+        }
         let header_payload = reader
             .read_raw((header.header_payload_len - AfcPacketHeader::LEN) as usize)
             .await?;

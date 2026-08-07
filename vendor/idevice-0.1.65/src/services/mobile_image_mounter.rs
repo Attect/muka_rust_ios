@@ -283,6 +283,9 @@ impl ImageMounter {
         let res = self.idevice.read_plist().await?;
         match res.get("Status") {
             Some(plist::Value::String(s)) if s.as_str() == "Complete" => Ok(()),
+            // Older devices reject UnmountImage with UnknownCommand; treat it
+            // as a successful no-op, matching go-ios v1.2.1 best-effort unmount.
+            Some(plist::Value::String(s)) if s.as_str() == "UnknownCommand" => Ok(()),
             _ => Err(IdeviceError::UnexpectedResponse(
                 "expected Complete Status in UnmountImage response".into(),
             )),

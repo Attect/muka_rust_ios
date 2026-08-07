@@ -264,6 +264,24 @@ fn parse_payload(datum: &plist::Value) -> PasteboardPayload {
     }
 }
 
+/// Turns an error reply frame into an error. The daemon reports failures as
+/// `{"error": {"code", "domain", "userInfo"}}` frames instead of a `*_REPLY`
+/// (observed on device: NSCocoaErrorDomain 4864 for a malformed SET,
+/// com.apple.dt.CoreDeviceError -1 for an unknown command), so callers must
+/// check before treating a populated frame as the reply — go-ios 1317039.
+fn check_service_error(reply: &plist::Value) -> Result<(), IdeviceError> {
+    let Some(err) = reply.as_dictionary().and_then(|d| d.get("error")) else {
+        return Ok(());
+    };
+    let dict = err.as_dictionary();
+    let domain = dict.and_then(|d| d.get("domain")).and_then(|v| v.as_string());
+    let code = dict.and_then(|d| d.get("code"));
+    Err(IdeviceError::UnexpectedResponse(format!(
+        "pasteboard service returned an error: {err:?} (domain {}, code {code:?})",
+        domain.unwrap_or("unknown")
+    )))
+}
+
 #[derive(Debug)]
 pub struct PasteboardServiceClient<R: ReadWrite> {
     inner: RemoteXpcClient<R>,
@@ -310,6 +328,7 @@ impl<R: ReadWrite> PasteboardServiceClient<R> {
 
         self.inner.send_object(msg, true).await?;
         let reply = self.inner.recv().await?;
+        check_service_error(&reply)?;
         Ok(PasteboardSnapshot::from_message(&reply)?)
     }
 
@@ -335,8 +354,10 @@ impl<R: ReadWrite> PasteboardServiceClient<R> {
         });
 
         self.inner.send_object(msg, true).await?;
-        // Drain the SET_REPLY ack; it carries no information we surface.
-        self.inner.recv().await?;
+        // Drain the SET_REPLY ack; surface error frames instead of silently
+        // succeeding (go-ios 1317039).
+        let reply = self.inner.recv().await?;
+        check_service_error(&reply)?;
         Ok(())
     }
 
@@ -362,8 +383,10 @@ impl<R: ReadWrite> PasteboardServiceClient<R> {
         });
 
         self.inner.send_object(msg, true).await?;
-        // Drain the SET_REPLY ack; it carries no information we surface.
-        self.inner.recv().await?;
+        // Drain the SET_REPLY ack; surface error frames instead of silently
+        // succeeding (go-ios 1317039).
+        let reply = self.inner.recv().await?;
+        check_service_error(&reply)?;
         Ok(())
     }
 

@@ -14,6 +14,13 @@ use std::collections::HashMap;
 
 use bytes::Bytes;
 
+/// Maximum nesting depth for decoded archives. go-ios uses 1000 on its
+/// dynamically-grown goroutine stacks; Rust uses fixed 8 MiB test/worker
+/// stacks, and a 256-level bound keeps even debug-frame overhead well under
+/// the budget while still rejecting crafted cyclic/deep archives. Real
+/// device payloads (sysmontap batches, XCTest configuration) nest < 50.
+const DEPTH_LIMIT: usize = 256;
+
 #[derive(Debug, Clone)]
 pub enum ArchiveValue {
     Null,
@@ -74,21 +81,31 @@ pub fn unarchive(data: &[u8]) -> Result<ArchiveValue, ArchiveError> {
         .and_then(uid_from_plist)
         .ok_or_else(|| ArchiveError::Invalid("missing $top.root uid".into()))?;
 
-    decode_object(objects, root_uid)
+    decode_object(objects, root_uid, 0)
 }
 
 /// Decode a single object by its UID index into the $objects array.
-fn decode_object(objects: &[plist::Value], uid: usize) -> Result<ArchiveValue, ArchiveError> {
+fn decode_object(
+    objects: &[plist::Value],
+    uid: usize,
+    depth: usize,
+) -> Result<ArchiveValue, ArchiveError> {
+    if depth > DEPTH_LIMIT {
+        return Err(ArchiveError::Invalid(
+            "archive nesting exceeds depth limit".into(),
+        ));
+    }
     if uid >= objects.len() {
         return Err(ArchiveError::Invalid(format!("uid {uid} out of bounds")));
     }
 
-    decode_value(objects, &objects[uid])
+    decode_value(objects, &objects[uid], depth)
 }
 
 fn decode_value(
     objects: &[plist::Value],
     obj: &plist::Value,
+    depth: usize,
 ) -> Result<ArchiveValue, ArchiveError> {
     // $null sentinel
     if obj.as_string() == Some("$null") {
@@ -166,7 +183,7 @@ fn decode_value(
                     .unwrap_or_default();
                 let mut result = Vec::with_capacity(items.len());
                 for uid in items {
-                    result.push(decode_object(objects, uid)?);
+                    result.push(decode_object(objects, uid, depth + 1)?);
                 }
                 return Ok(ArchiveValue::Array(result));
             }
@@ -183,14 +200,14 @@ fn decode_value(
                     .unwrap_or_default();
                 let mut map = HashMap::new();
                 for (k_uid, v_uid) in keys.into_iter().zip(vals) {
-                    let key_str = match decode_object(objects, k_uid) {
+                    let key_str = match decode_object(objects, k_uid, depth + 1) {
                         Ok(ArchiveValue::String(k)) => k,
                         Ok(ArchiveValue::Int(n)) => n.to_string(),
                         Ok(ArchiveValue::Float(f)) => f.to_string(),
                         Ok(ArchiveValue::Bool(b)) => b.to_string(),
                         _ => continue,
                     };
-                    let v = decode_object(objects, v_uid)?;
+                    let v = decode_object(objects, v_uid, depth + 1)?;
                     map.insert(key_str, v);
                 }
                 return Ok(ArchiveValue::Dict(map));
@@ -208,7 +225,7 @@ fn decode_value(
             | "DTTapStatusMessage"
             | "DTKTraceTapMessage" => {
                 if let Some(uid) = dict.get("DTTapMessagePlist").and_then(uid_from_plist) {
-                    return decode_object(objects, uid);
+                    return decode_object(objects, uid, depth + 1);
                 }
                 return Ok(ArchiveValue::Unknown(class_name.to_string()));
             }
@@ -218,7 +235,7 @@ fn decode_value(
                     if key == "$class" {
                         continue;
                     }
-                    map.insert(key.clone(), decode_field_value(objects, value)?);
+                    map.insert(key.clone(), decode_field_value(objects, value, depth + 1)?);
                 }
                 if !map.contains_key("ObjectType") {
                     map.insert(
@@ -237,26 +254,27 @@ fn decode_value(
 fn decode_field_value(
     objects: &[plist::Value],
     value: &plist::Value,
+    depth: usize,
 ) -> Result<ArchiveValue, ArchiveError> {
     if let Some(uid) = uid_from_plist(value) {
-        return decode_object(objects, uid);
+        return decode_object(objects, uid, depth + 1);
     }
 
     match value {
         plist::Value::Array(items) => Ok(ArchiveValue::Array(
             items
                 .iter()
-                .map(|item| decode_field_value(objects, item))
+                .map(|item| decode_field_value(objects, item, depth + 1))
                 .collect::<Result<Vec<_>, _>>()?,
         )),
         plist::Value::Dictionary(dict) if !dict.contains_key("$class") => {
             let mut map = HashMap::new();
             for (key, value) in dict {
-                map.insert(key.clone(), decode_field_value(objects, value)?);
+                map.insert(key.clone(), decode_field_value(objects, value, depth + 1)?);
             }
             Ok(ArchiveValue::Dict(map))
         }
-        _ => decode_value(objects, value),
+        _ => decode_value(objects, value, depth),
     }
 }
 
@@ -323,9 +341,9 @@ mod tests {
             plist::Value::String("$null".to_string()),
             plist::Value::String("hello".to_string()),
         ];
-        let result = decode_object(&objects, 0).unwrap();
+        let result = decode_object(&objects, 0, 0).unwrap();
         assert!(matches!(result, ArchiveValue::Null));
-        let result2 = decode_object(&objects, 1).unwrap();
+        let result2 = decode_object(&objects, 1, 0).unwrap();
         assert_eq!(result2.as_str(), Some("hello"));
     }
 
@@ -357,7 +375,7 @@ mod tests {
             plist::Value::String("payload".to_string()),
         ];
 
-        let decoded = decode_object(&objects, 1).unwrap();
+        let decoded = decode_object(&objects, 1, 0).unwrap();
         let map = decoded
             .as_dict()
             .expect("unknown class should decode to dict");
@@ -394,7 +412,42 @@ mod tests {
             ])),
         ];
 
-        let decoded = decode_object(&objects, 1).unwrap();
+        let decoded = decode_object(&objects, 1, 0).unwrap();
         assert!(matches!(decoded, ArchiveValue::Null));
+    }
+
+    #[test]
+    fn test_decode_depth_limit() {
+        // A self-referential archive must fail at DEPTH_LIMIT instead of
+        // overflowing the stack (go-ios v1.2.1 NSKeyedArchiver hardening).
+        let objects = vec![
+            plist::Value::String("$null".to_string()),
+            plist::Value::Dictionary(plist::Dictionary::from_iter([
+                (
+                    "NS.objects".to_string(),
+                    plist::Value::Array(vec![plist::Value::Uid(plist::Uid::new(1))]),
+                ),
+                ("$class".to_string(), plist::Value::Uid(plist::Uid::new(2))),
+            ])),
+            plist::Value::Dictionary(plist::Dictionary::from_iter([
+                (
+                    "$classname".to_string(),
+                    plist::Value::String("NSArray".into()),
+                ),
+                (
+                    "$classes".to_string(),
+                    plist::Value::Array(vec![
+                        plist::Value::String("NSArray".into()),
+                        plist::Value::String("NSObject".into()),
+                    ]),
+                ),
+            ])),
+        ];
+
+        let err = decode_object(&objects, 1, 0).unwrap_err();
+        assert!(
+            err.to_string().contains("depth limit"),
+            "unexpected error: {err}"
+        );
     }
 }

@@ -463,7 +463,20 @@ impl UsbmuxdConnection {
         self.socket.read_exact(&mut header_buffer).await?;
 
         // We are safe to unwrap as it only panics if the buffer isn't 4
-        let packet_size = u32::from_le_bytes(header_buffer[..4].try_into().unwrap()) - 16;
+        let total_size = u32::from_le_bytes(header_buffer[..4].try_into().unwrap());
+        // Validate the header before subtracting, so a malformed size cannot
+        // underflow into a huge allocation (go-ios v1.2.1 hardening).
+        if total_size < 16 {
+            return Err(IdeviceError::UnexpectedResponse(format!(
+                "invalid usbmuxd plist message size {total_size}"
+            )));
+        }
+        let packet_size = total_size - 16;
+        if packet_size > 16 * 1024 * 1024 {
+            return Err(IdeviceError::UnexpectedResponse(format!(
+                "usbmuxd plist message too large: {packet_size} bytes (limit 16 MiB)"
+            )));
+        }
         debug!("Reading {packet_size} bytes from muxer");
 
         let mut body_buffer = vec![0; packet_size as usize];
