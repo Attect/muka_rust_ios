@@ -32,7 +32,7 @@
 | `list [--details]` | implemented | Windows Apple Mobile Device Process 只读验证通过 |
 | `listen` | offline-tested | server registry watch + 超时长轮询，Ctrl+C 退出 |
 | `buid` | implemented | usbmuxd `ReadBUID`；iTunes 重启后 Windows 真机返回有效 BUID |
-| `readpair` | device-test-needed | 显式 `--udid`；输出可能含私钥，recording 会脱敏 |
+| `readpair` | implemented | 显式 `--udid`；输出可能含私钥，recording 会脱敏；2026-08-07 iOS 26 真机解析 10 键 PairRecord（仅内存核对，未落盘） |
 | `pair [--name]`, `pair --p12file [--password]` | device-test-needed | 标准 trust-dialog 路径；supervised P12 challenge-response、纯 Rust cert chain/CMS、private-key 隔离和 usbmuxd save 已离线测试；真实 record 替换未执行 |
 | `info`, `info lockdown` | implemented | Windows USB Lockdown；iOS 26 stable identity 字段真机通过 |
 | `info display` | implemented | server-owned shared RSD `com.apple.coredevice.deviceinfo`；iOS 26 与 go-ios 四顶层字段/6 displays 一致 |
@@ -150,6 +150,31 @@
 | `ax [--font]` inspector | implemented | server-owned AX DTX session、同设备互斥、NDJSON output、stop/restart/restore；iOS 26 两代 session 各 3 个真实 focus event，cleanup 后 audit 重连通过；`--font` 会改设置，仅 offline-tested |
 | `sign app [--install]` | offline-tested | host-only `.app/.ipa` 重签名；generated Mach-O/CMS/P12 与 IPA mode/repackage 闭环；`--install` 复用 backend |
 | `sign certificate/provision appstoreconnect` | offline-tested | host-only ES256 JWT/JSON:API、Bundle/device ensure、RSA CSR、certificate/P12、profile 与 existing certificate reuse；原子 client-relative output、secret/state 隔离和本地 Apple API process smoke 通过，真实账号未测 |
+
+## 新增：go-ios v1.2.1 同步（2026-08-07）
+
+参考基线推进到 `main-Attect-dev@7c9a4dd`（v1.2.1，50 个新提交）。对照结论：
+
+- 已对齐无需改动：TSS RestoreRequestRules 引擎与 TLS 验证（vendor `tss.rs` 已有）、
+  mount/unmount 回复校验（含 pre-iOS17）、RSD service 缺失 fail-fast、Instruments PID 类型守卫、
+  XCTest iOS 14-16 内存配置（vendor 已是内存构建）、AFC pull zip-slip（`remote_entry_components`
+  拒绝 `..`/绝对路径，2026-07-20 回归修正时已加入）。
+- 本阶段补上的加固：usbmuxd plist 16 MiB 分配上限、AFC readPacket 长度下界/一致性校验、
+  NSKeyedArchiver 递归深度上限（Rust 固定栈下取 256，go-ios 为 1000）、unmount_image 对
+  `UnknownCommand` 容错（旧设备 best-effort）、tss.rs 规则引擎单元测试（6 项）、删除
+  `command_afc` 的 v0.1 `--app-group/--crash/--temp` 死代码 gates。
+- **协议差异发现**：go-ios 的 XPC body 含 8 字节 body header（`BodyLen >= 8` 检查成立），
+  rust-ios 的 XPC body 直接承载 XPCObject 编码（空字典控制帧可小于 8 字节），因此该检查
+  不适用并已在真机验证中移除；长度一致性由越界检查与 `XPCObject::decode` 内部边界保证。
+
+| 能力 | 状态 | 当前范围 |
+|---|---|---|
+| `pasteboard get/set <text>` | implemented | iOS 17+ `com.apple.coredevice.pasteboardservice` RemoteXPC（server-owned shared RSD）；get 返回文本/条目统计，set 覆盖 general pasteboard 且不回显内容；`{"error":{...}}` 帧作为错误返回（对齐 go-ios 1317039）；iOS 26 真机 get/set/读回/恢复闭环通过，缺 tunnel 返回结构化错误 |
+| `mdm security-info` | offline-tested | MCInstall `SecurityInfo`（go-ios a778c9e）；只读 passcode 存在性/策略合规/锁屏宽限/硬件加密；要求 supervision identity 先 escalation；错误只渲染 Status/ErrorChain 摘要，绝不输出携带 token 的整个响应 |
+| `mdm fetch-unlock-token` | offline-tested | MCInstall `RequestUnlockToken`；token 写入 `--output`（0600）或 `--output=-` base64 stdout；无 passcode 时 DMCKeybagErrorDomain 37002 映射为明确错误；真机未监督设备路径待 supervision 资产 |
+| `mdm clear-passcode` | offline-tested | MCInstall `ClearPasscode` + `--token` 文件；错误渲染脱敏（ClearPasscode 响应会回显 token） |
+| `mdm clear-screen-time-password` | offline-tested | MCInstall `ClearRestrictionsPassword`；无需 token，supervisor identity 即可 |
+| `pair` 锁定设备 | implemented | 设备锁定（passcode screen）时 supervised pair 无 Error 也无 EscrowBag 的场景返回 `DeviceLocked`（go-ios `ErrDeviceLockedPairingDeferred`），exit 2，不保存 pair record；Lockdown `DeviceLocked/PasswordProtected` 同样映射 |
 
 ## 已知协议限制
 

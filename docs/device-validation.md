@@ -691,6 +691,33 @@ MCInstall 高风险组还必须准备：原始 cloud config、原 language/local
 Wi-Fi SSID、proxy identifier，以及可用的 supervision identity 备份。验证顺序为 read cloud config -> 单一
 写操作 -> read back -> remove/恢复 -> 再进入下一项。任何 P12/password/private key 都不得写入结果模板。
 
+### 2026-08-07 go-ios v1.2.1 同步真机验证（pasteboard 闭环与协议差异修复）
+
+使用本仓库 release `ios.exe`（28,801,536 bytes，2026-08-07 构建）、workspace 内隔离绝对 home
+`target/process-tests/device-verify-20260807` 和动态 IPC port。设备为文档同一台
+`测试 iPhone / iOS 26.5.2 / 23F84`，USB 连接。
+
+| 检查 | 实际结果 | 结论 |
+|---|---|---|
+| 设备枚举 | 初始 `list` 返回 `deviceList=[]`（PnP OK、AppleMobileDeviceProcess 运行中）；UAC 提权 `pnputil /restart-device` 两次（第二次 exit 3010，与 2026-07-18 记录一致）后重新发布同一台 `<udid>` | passed；usbmuxd 直接探测确认空列表来自 Apple upstream |
+| `info` / `apps --list` | 测试 iPhone / iOS 26.5.2 / 23F84，Activated；user app 24 | passed |
+| DDI / tunnel / RSD | 设备已挂载 Personalized DDI（`/System/Developer`，用户原有状态，本轮未动）；userspace tunnel running；`rsd ls` 返回 **83 个 service**，包含 `com.apple.coredevice.pasteboardservice` 与 `com.apple.instruments.dtservicehub` | passed |
+| **协议差异发现** | tunnel refresh 后 `rsd ls` 报 `malformed XPC message`；定位为新增的 XPC `body_len >= 8` 校验误伤——rust-ios 的 XPC body 直接承载 XPCObject 编码（空字典控制帧可小于 8 字节），与 go-ios 含 8 字节 body header 的结构不同；移除该校验后 83 services 正常 | fixed；go-ios 检查不适用于 rust-ios 协议结构 |
+| `pasteboard get` | 原始剪贴板空：`items=0`、`changeCount=5` | passed |
+| `pasteboard set` | `status=set`、`serviceTransport=shared_rsd`；内容未回显 | passed |
+| `pasteboard get` 读回 | `text='rust-ios-verify-20260807'`、`items=1`、`changeCount=6` | passed；set/get 闭环一致 |
+| `pasteboard set ""` 恢复 | 剪贴板清空，`text=''` | passed；恢复原始空状态 |
+| `readpair` | 解析 10 键 PairRecord（Device/Host/Root cert+key、EscrowBag、SystemBUID 等），仅在内存核对，未落盘 | passed |
+| `webinspector list` | 结构化错误 `Web Inspector is unavailable; enable Settings > Safari > Advanced > Web Inspector...` | blocked by device setting（与历史一致） |
+| `launch com.apple.mobilesafari` | warning `reused server-owned shared RSD tunnel`；返回 `pid=2413`；`ps --apps` 16 个 app process 中可见 MobileSafari 2413 | passed |
+| `kill com.apple.mobilesafari` | `status=killed`；随后 `ps --apps` 中 MobileSafari 消失 | passed |
+| cleanup | `task stop all` 后 `tasks=[]`；`kill-server`；IPC port 无 listener；无 `ios.exe` 进程残留；未修改设备原有 DDI/image 状态 | passed |
+
+本轮未执行：erase/shutdown/set-wallpaper/supervised pair/mdm 真机写（无 supervision identity 资产）、
+WebInspector 设置开启、RemotePairing（Windows 无 iPhone IPv6 接口）、Wintun（非管理员）。
+mdm 四子命令仅完成 mock/离线测试，真机路径待监督设备与 identity 资产。
+
+
 ## go-ios 对比模板
 
 ```text

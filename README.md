@@ -76,6 +76,12 @@ Workspace 分为四个 crate，依赖方向严格单向：
   identity 生成和 PKCS#12/CMS silent install；真实设备写操作尚待专用设备验证。
 - `idevice`、mock、replay、recording 四类 backend；PairRecord 录制强制脱敏。
 - 无设备单元/集成测试，以及隔离 home/随机端口的 Windows 子进程、并发和恢复测试。
+- iOS 17+ pasteboard 读写（`com.apple.coredevice.pasteboardservice`）与 supervised MDM 管理
+  （`mdm security-info`、`fetch-unlock-token`、`clear-passcode`、`clear-screen-time-password`），
+  与 go-ios v1.2.1 对齐；pair 在设备锁定（passcode screen）时返回 exit 2 且不保存 pair record。
+- 协议加固已同步 go-ios v1.2.1：usbmuxd/AFC/XPC 长度与下界校验、NSKeyedArchiver 深度上限、
+  unmount UnknownCommand 容错、tss 规则引擎测试；TSS RestoreRequestRules、TLS 验证、mount/unmount
+  回复校验、zip-slip 防护经对照确认已具备。`pasteboard` 已通过 iOS 26 真机闭环。
 
 未完成入口一律返回 `not_implemented` 结构化错误，不会伪造成功。
 
@@ -171,6 +177,10 @@ cargo build --workspace --release
   adapter/CoreDevice 数据面仍需提权真机复验。
 - `debug <app_path>`、WebInspector js-shell、supervised pairing、unit XCTest 与 test filters 已接入，
   其中 app debug 与 unit/filter 完整真机运行仍需设备测试；MCInstall supervision escalation 已接入。
+- mdm 四子命令与 pasteboard 已完成实现和 mock/离线测试；pasteboard 已通过 iOS 26 真机闭环，
+  mdm 完整真机验证需要 supervision identity 资产与监督设备。
+- WebInspector page list/eval/CDP 真机验证仍被设备"Web 检查器"设置关闭阻塞；RemotePairing 真机
+  数据面仍受 Windows 缺少 iPhone IPv6/link-local interface 阻塞；App Store Connect 需真实 Apple 账号。
 
 ## 实现说明
 

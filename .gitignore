@@ -18,3 +18,6 @@ Thumbs.db
 /supervision-csr.csr
 /supervision-identity.p12
 /selfIdentity.plist
+# 本机工具目录与 vendored 测试副产物
+/.zcode/
+/vendor/*/Cargo.lock

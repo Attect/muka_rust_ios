@@ -16,22 +16,22 @@
 生命周期测试可重复。真机协议功能只有在真机验证后才标记为 `verified`，不能把“能编译”写成
 “已验证”。
 
-## 当前进度（2026-07-18）
+## 当前进度（2026-08-07）
 
 | 阶段 | 状态 | 当前证据/剩余工作 |
 |---|---|---|
-| P0 参考审计 | complete | `5804fa9` Usage、iOS 26 DDI 修正与命令族已进入矩阵 |
+| P0 参考审计 | complete | 基线推进到 go-ios `main-Attect-dev@7c9a4dd`（v1.2.1，+50 提交）：新增 pasteboard/mdm/pair-exit2 已同步；TSS、mount、RSD、XCTest、zip-slip 等经对照确认已具备；usbmuxd/AFC/XPC/NSKeyedArchiver 加固已补齐（其中 XPC body_len 检查因协议结构差异不适用，见 feature-matrix） |
 | P1 workspace/IPC | complete | protocol 1.20、codec/auth/request ID、typed OsTrace options、交互 task input、client-owned lease、WDA event、XCTest unit/filter/shared RSD、Windows kernel tunnel 与 dproxy capability 测试 |
 | P2 server 生命周期 | complete on Windows | detached spawn、lock、强杀恢复进程测试 |
-| P3 backend/usbmuxd | in progress | mock/replay/recording 完成；Windows list/info 只读通过 |
+| P3 backend/usbmuxd | complete for Windows | mock/replay/recording 完成；Windows list/info 只读通过；2026-08-07 pnputil 恢复枚举后 iOS 26 回归通过 |
 | P4 task manager | complete for current task kinds | list/show/stop/restart/output、原子 state、退避/恢复；dproxy active connection 取消与超时 supervisor abort 已测 |
 | P5 forward | implemented | echo、冲突、并发、强杀恢复；iOS 26 Lockdown 真机转发通过 |
 | P6 tunnel | partial | iOS 26 USB userspace lifecycle/RSD/restart 通过；RemotePairing TCP 离线闭环完成但真机 mDNS 受 host interface 阻塞；Windows Wintun lifecycle/packet pump 离线通过，提权真机数据面待测 |
-| P7 命令迁移 | in progress | 基础/AFC/诊断/DVT/SpringBoard 已有一批；完整矩阵仍有 planned |
-| P8 验证/文档 | in progress | 219 workspace tests、shared XCTest 专项 process smoke、多套隔离 process/compat smoke、Windows/iOS 26 多轮真机记录；ASC 真实账号、RemotePairing/macOS/Linux 矩阵待做 |
+| P7 命令迁移 | in progress | 矩阵已无 planned；pasteboard 真机闭环通过（iOS 26）；mdm 四子命令 offline 完成待 supervision 资产；完整矩阵仍有 device-test-needed 项 |
+| P8 验证/文档 | in progress | 233 workspace tests、shared XCTest 专项 process smoke、多套隔离 process/compat smoke、Windows/iOS 26 多轮真机记录；ASC 真实账号、RemotePairing/macOS/Linux 矩阵待做 |
 
 `complete` 只描述该阶段列出的当前架构交付，不表示 go-ios 全功能目标完成。整体 goal 在功能矩阵
-仍有 planned 项时保持进行中。
+仍有 device-test-needed 项时保持进行中。
 
 ## 2. 阶段与验收
 

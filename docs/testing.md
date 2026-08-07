@@ -20,9 +20,10 @@
 | 子进程 smoke | 自动启动、数据面、重启、并发、端口冲突、强杀恢复、redaction |
 | 只读宿主机检查 | Apple Mobile Device Process `list`；其余真机能力独立审批 |
 
-当前 workspace 有 227 项 Rust 测试：CLI 33、core 119、protocol 12、server 63。受控
-`vendor/idevice-0.1.65` 另有 4 项 XCTest archive/configuration/launch 定向测试和 1 项 DVT
-`killPid:` wire argument 定向测试。
+当前 workspace 有 233 项 Rust 测试：CLI 33、core 125、protocol 12、server 63。受控
+`vendor/idevice-0.1.65` 另有 4 项 XCTest archive/configuration/launch 定向测试、1 项 DVT
+`killPid:` wire argument 定向测试和 6 项 TSS RestoreRequestRules 规则引擎测试；受控
+`vendor/ios-core-0.1.7` 另含 NSKeyedArchiver 解码深度上限测试。
 
 ## Cargo Gate
 
@@ -142,12 +143,15 @@ node scripts/compat-cli.mjs target/release/ios.exe C:/Users/<user>/bin/ios.exe
 ```
 
 脚本从参考 `go-ios --help` 提取命令路径。当前基线得到 86 条，逐条执行 Rust 版
-`<command> --help`，要求 exit 0 且临时 home 中没有 `server.json`。随后验证 version JSON、mock 空
-设备 `{"deviceList":[]}`、mock MobileGestalt JSON/go-ios envelope/XML plist、mock `ax audit/resetax`、
+`<command> --help`，要求 exit 0 且临时 home 中没有 `server.json`。随后验证 version JSON、mock 设备
+列表（`RUST_IOS_MOCK_DEVICES=mock-phone`，空列表形状由 mock 单元测试覆盖）、mock MobileGestalt
+JSON/go-ios envelope/XML plist、mock `ax audit/resetax`、
 `ui status`、幂等 `activate`、mock `erase` 双重确认 gate、mock supervised pair、mock `set-wallpaper`
 screen/Where 合约，以及独立 home/port 的 `webinspector js-shell` stdin eval/退出/task cleanup；另用
 `runwda --log-output=-` 启动 mock WDA，验证 `application/x-ndjson` event capture、`task output` 与 stop，
-最后关闭隔离 server。
+最后关闭隔离 server。go-ios v1.2.1 新增的 `pasteboard get/set` 与 `mdm` 四子命令以显式列表验证
+（参考二进制可能早于 v1.2.1）：help 不启动 server、mock get/set 形状、`mdm security-info` mock 形状、
+缺 `--p12file` 结构化拒绝，标记 `V121_COMMANDS=ok`。
 
 UI focused tests 使用临时 loopback HTTP server 校验 WDA `/status`、显式 session tap、DeviceKit
 JSON-RPC envelope、screenshot base64 与 client-relative 文件输出；mock backend 另行覆盖 status、

@@ -85,10 +85,12 @@ try {
 
   const list = invoke(bin, ['list', ...common], { env });
   const listValue = JSON.parse(list.stdout);
-  if (list.status !== 0 || !Array.isArray(listValue.deviceList) || listValue.deviceList.length !== 0) {
-    throw new Error(`invalid empty list output: ${list.stdout} ${list.stderr}`);
+  // mock backend 通过 RUST_IOS_MOCK_DEVICES 附加 mock-phone，后续测试依赖它；
+  // 空设备列表形状由 mock/in-process 单元测试覆盖（docs/testing.md）。
+  if (list.status !== 0 || !Array.isArray(listValue.deviceList) || listValue.deviceList.length === 0) {
+    throw new Error(`invalid mock list output: ${list.stdout} ${list.stderr}`);
   }
-  console.log('EMPTY_DEVICE_LIST=ok');
+  console.log('MOCK_DEVICE_LIST=ok');
 
   const gestaltJson = invoke(bin, ['mobilegestalt', 'MockGestalt', ...common], { env });
   const gestaltJsonValue = JSON.parse(gestaltJson.stdout);
@@ -358,6 +360,68 @@ try {
 
   const shutdown = invoke(bin, ['kill-server', ...common], { env });
   if (shutdown.status !== 0) throw new Error(`kill-server failed: ${shutdown.stderr}`);
+
+  // go-ios v1.2.1 新增命令（参考二进制可能早于 v1.2.1，显式验证而非从 help 提取）
+  for (const args of [
+    ['pasteboard', '--help'],
+    ['pasteboard', 'get', '--help'],
+    ['pasteboard', 'set', '--help'],
+    ['mdm', '--help'],
+    ['mdm', 'security-info', '--help'],
+    ['mdm', 'fetch-unlock-token', '--help'],
+    ['mdm', 'clear-passcode', '--help'],
+    ['mdm', 'clear-screen-time-password', '--help'],
+  ]) {
+    const result = invoke(bin, [...args, ...common], { env });
+    if (result.status !== 0) {
+      throw new Error(
+        `Rust help failed for ${args.join(' ')}: status=${result.status}\nstdout=${result.stdout}\nstderr=${result.stderr}`
+      );
+    }
+    if (existsSync(join(home, 'server.json'))) {
+      throw new Error(`help unexpectedly started server for ${args.join(' ')}`);
+    }
+  }
+  const pasteboardGet = invoke(bin, ['pasteboard', 'get', ...common], { env });
+  const pasteboardGetValue = JSON.parse(pasteboardGet.stdout);
+  if (
+    pasteboardGet.status !== 0 ||
+    pasteboardGetValue.pasteboard !== 'general' ||
+    pasteboardGetValue.text !== 'mock pasteboard text' ||
+    pasteboardGetValue.serviceTransport !== 'mock'
+  ) {
+    throw new Error(
+      `invalid mock pasteboard get: status=${pasteboardGet.status} stdout=${pasteboardGet.stdout} stderr=${pasteboardGet.stderr}`
+    );
+  }
+  const pasteboardSet = invoke(bin, ['pasteboard', 'set', 'compat-text', ...common], { env });
+  const pasteboardSetValue = JSON.parse(pasteboardSet.stdout);
+  if (pasteboardSet.status !== 0 || pasteboardSetValue.status !== 'set' || 'text' in pasteboardSetValue) {
+    throw new Error(
+      `invalid mock pasteboard set: status=${pasteboardSet.status} stdout=${pasteboardSet.stdout} stderr=${pasteboardSet.stderr}`
+    );
+  }
+  const mdmInfo = invoke(bin, ['mdm', 'security-info', '--p12file', 'identity.p12', ...common], { env });
+  const mdmInfoValue = JSON.parse(mdmInfo.stdout);
+  if (
+    mdmInfo.status !== 0 ||
+    mdmInfoValue.securityInfo?.PasscodePresent !== false ||
+    mdmInfoValue.serviceTransport !== 'mock'
+  ) {
+    throw new Error(
+      `invalid mock mdm security-info: status=${mdmInfo.status} stdout=${mdmInfo.stdout} stderr=${mdmInfo.stderr}`
+    );
+  }
+  const mdmNoIdentity = invoke(bin, ['mdm', 'security-info', ...common], { env });
+  if (
+    mdmNoIdentity.status === 0 ||
+    !(mdmNoIdentity.stdout + mdmNoIdentity.stderr).includes('invalid_request')
+  ) {
+    throw new Error(
+      `mdm without --p12file must fail: status=${mdmNoIdentity.status} stdout=${mdmNoIdentity.stdout} stderr=${mdmNoIdentity.stderr}`
+    );
+  }
+  console.log('V121_COMMANDS=ok');
   console.log('CLI_COMPAT_OK');
 } finally {
   if (existsSync(join(home, 'server.json'))) {
