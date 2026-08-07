@@ -225,6 +225,10 @@ pub enum ErrorCode {
     DeviceUnavailable,
     UsbmuxdUnavailable,
     PairingRequired,
+    // 设备处于锁定状态（passcode screen），配对被推迟；解锁后重试即可。
+    // 与 PairingRequired 的区别是它已到达设备信任链路，只是无法持久化
+    // pair record（go-ios v1.2.1 ExitCodeDeviceLocked=2）。
+    DeviceLocked,
     PermissionDenied,
     UnsupportedPlatform,
     NotImplemented,

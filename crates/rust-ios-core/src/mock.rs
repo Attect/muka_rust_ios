@@ -1095,6 +1095,44 @@ impl DeviceBackend for MockDeviceBackend {
                     )));
                 }
             },
+            "mdm" => {
+                let action = invocation.argv.get(1).map(String::as_str).ok_or_else(|| {
+                    CoreError::InvalidArgument(
+                        "mdm requires security-info, fetch-unlock-token, clear-passcode or clear-screen-time-password"
+                            .into(),
+                    )
+                })?;
+                if mock_option_value(&invocation.argv, "--p12file").is_none() {
+                    return Err(CoreError::InvalidArgument("mdm requires --p12file".into()));
+                }
+                match action {
+                    "security-info" => json!({
+                        "securityInfo": {
+                            "PasscodePresent": false,
+                            "PasscodeCompliant": true,
+                            "PasscodeCompliantWithProfiles": true,
+                            "ManagementStatus": "supervised",
+                        },
+                        "serviceTransport": "mock",
+                    }),
+                    "fetch-unlock-token" => json!({
+                        "status": "fetched",
+                        "path": mock_option_value(&invocation.argv, "--output")
+                            .unwrap_or_else(|| "mock-unlock-token".into()),
+                        "bytes": 32,
+                        "mock": true,
+                    }),
+                    "clear-passcode" => json!({ "status": "cleared", "serviceTransport": "mock" }),
+                    "clear-screen-time-password" => {
+                        json!({ "status": "cleared", "serviceTransport": "mock" })
+                    }
+                    other => {
+                        return Err(CoreError::InvalidArgument(format!(
+                            "unknown mock mdm action {other:?}"
+                        )));
+                    }
+                }
+            }
             "wifi" => {
                 let ssid = mock_option_value(&invocation.argv, "--ssid").ok_or_else(|| {
                     CoreError::InvalidArgument("wifi requires a non-empty --ssid".into())
@@ -1399,6 +1437,28 @@ impl DeviceBackend for MockDeviceBackend {
                 "displayName": "Mock",
             }]]),
             "set-icon-layout" => json!({ "status": "set", "mock": true }),
+            "pasteboard" => match invocation.argv.get(1).map(String::as_str) {
+                Some("get") => json!({
+                    "pasteboard": "general",
+                    "changeCount": 7,
+                    "text": "mock pasteboard text",
+                    "items": 1,
+                    "imageUti": null,
+                    "imageBytes": null,
+                    "promisedItems": 0,
+                    "serviceTransport": "mock",
+                }),
+                Some("set") => json!({
+                    "status": "set",
+                    "pasteboard": "general",
+                    "serviceTransport": "mock",
+                }),
+                action => {
+                    return Err(CoreError::InvalidArgument(format!(
+                        "unknown mock pasteboard action {action:?}"
+                    )));
+                }
+            },
             "fsync" => match invocation.argv.get(1).map(String::as_str) {
                 Some("tree") => json!({
                     "path": "/",
@@ -2939,6 +2999,118 @@ mod tests {
         assert_eq!(value["screen"], "lock");
         assert_eq!(value["where"], 1);
         assert_eq!(value["supervised"], true);
+    }
+
+    #[tokio::test]
+    async fn mock_pasteboard_get_and_set_have_stable_shapes() {
+        let backend = MockDeviceBackend::new();
+        backend.attach_usb("mock-1").await;
+        let invocation = |argv: &[&str]| CommandInvocation {
+            argv: argv.iter().map(|value| (*value).to_owned()).collect(),
+            cwd: None,
+            udid: Some("mock-1".into()),
+            output: Default::default(),
+        };
+
+        let value = backend
+            .execute(&invocation(&["pasteboard", "get"]))
+            .await
+            .unwrap()
+            .value
+            .unwrap();
+        assert_eq!(value["pasteboard"], "general");
+        assert_eq!(value["text"], "mock pasteboard text");
+        assert_eq!(value["items"], 1);
+        assert_eq!(value["serviceTransport"], "mock");
+
+        let value = backend
+            .execute(&invocation(&["pasteboard", "set", "hello"]))
+            .await
+            .unwrap()
+            .value
+            .unwrap();
+        assert_eq!(value["status"], "set");
+        // 文本不得回显到结果，避免剪贴板内容进入日志。
+        assert!(value.get("text").is_none());
+
+        assert!(matches!(
+            backend.execute(&invocation(&["pasteboard", "copy"])).await,
+            Err(CoreError::InvalidArgument(_))
+        ));
+        assert!(matches!(
+            backend.execute(&invocation(&["pasteboard"])).await,
+            Err(CoreError::InvalidArgument(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn mock_mdm_requires_identity_and_supports_four_actions() {
+        let backend = MockDeviceBackend::new();
+        backend.attach_usb("mock-1").await;
+        let invocation = |argv: &[&str]| CommandInvocation {
+            argv: argv.iter().map(|value| (*value).to_owned()).collect(),
+            cwd: None,
+            udid: Some("mock-1".into()),
+            output: Default::default(),
+        };
+
+        // 缺 --p12file 必须在执行前拒绝。
+        for missing in [
+            invocation(&["mdm", "security-info"]),
+            invocation(&["mdm", "fetch-unlock-token", "--output", "token.bin"]),
+        ] {
+            assert!(matches!(
+                backend.execute(&missing).await,
+                Err(CoreError::InvalidArgument(_))
+            ));
+        }
+        // 未知 action。
+        assert!(matches!(
+            backend
+                .execute(&invocation(&["mdm", "nuke", "--p12file", "id.p12"]))
+                .await,
+            Err(CoreError::InvalidArgument(_))
+        ));
+
+        let value = backend
+            .execute(&invocation(&[
+                "mdm",
+                "security-info",
+                "--p12file",
+                "identity.p12",
+            ]))
+            .await
+            .unwrap()
+            .value
+            .unwrap();
+        assert_eq!(value["securityInfo"]["PasscodePresent"], false);
+        assert_eq!(value["serviceTransport"], "mock");
+
+        let value = backend
+            .execute(&invocation(&[
+                "mdm",
+                "fetch-unlock-token",
+                "--p12file",
+                "identity.p12",
+                "--output",
+                "unlock-token.bin",
+            ]))
+            .await
+            .unwrap()
+            .value
+            .unwrap();
+        assert_eq!(value["status"], "fetched");
+        assert_eq!(value["bytes"], 32);
+
+        for action in ["clear-passcode", "clear-screen-time-password"] {
+            let value = backend
+                .execute(&invocation(&["mdm", action, "--p12file", "identity.p12"]))
+                .await
+                .unwrap()
+                .value
+                .unwrap();
+            assert_eq!(value["status"], "cleared");
+        }
     }
 
     #[tokio::test]

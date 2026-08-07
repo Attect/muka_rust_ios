@@ -101,7 +101,11 @@ impl McInstallClient {
         require_wallpaper_acknowledged(&response)
     }
 
-    async fn escalate(&mut self, p12_bytes: &[u8], password: &str) -> Result<(), IdeviceError> {
+    pub(crate) async fn escalate(
+        &mut self,
+        p12_bytes: &[u8],
+        password: &str,
+    ) -> Result<(), IdeviceError> {
         let certificate = certificate_from_identity(p12_bytes, password)
             .map_err(|error| IdeviceError::UnexpectedResponse(error.to_string()))?;
         let mut request = plist::Dictionary::new();
@@ -180,6 +184,75 @@ impl McInstallClient {
         let mut fields = plist::Dictionary::new();
         fields.insert("Payload".into(), plist::Value::Data(profile));
         self.request_acknowledged(request_type, fields).await
+    }
+
+    /// SecurityInfo（go-ios a778c9e）：只读查询 passcode 存在性/策略合规/
+    /// 锁屏宽限/硬件加密与管理状态。必须在已 escalate 的连接上调用；只读，
+    /// 不做任何 keybag 操作。
+    pub(crate) async fn security_info(&mut self) -> Result<plist::Dictionary, IdeviceError> {
+        let mut request = plist::Dictionary::new();
+        request.insert("RequestType".into(), "SecurityInfo".into());
+        let response = self.exchange(request).await?;
+        require_acknowledged_redacted(&response, "SecurityInfo")?;
+        response
+            .get("SecurityInfo")
+            .and_then(plist::Value::as_dictionary)
+            .cloned()
+            .ok_or_else(|| {
+                IdeviceError::UnexpectedResponse(
+                    "SecurityInfo missing or wrong type in response".into(),
+                )
+            })
+    }
+
+    /// RequestUnlockToken（go-ios 8df7d2e）：设备无 passcode 时返回解锁
+    /// token；已有 passcode 时 keybag 拒绝（DMCKeybagErrorDomain 37002），
+    /// 错误只渲染 domain/code/description，不输出携带 token 的整个响应。
+    pub(crate) async fn fetch_unlock_token(&mut self) -> Result<Vec<u8>, IdeviceError> {
+        let mut request = plist::Dictionary::new();
+        request.insert("RequestType".into(), "RequestUnlockToken".into());
+        let response = self.exchange(request).await?;
+        if !is_acknowledged(&response) {
+            let description = describe_rejected("RequestUnlockToken", &response);
+            if has_error_code(&response, KEYBAG_ERROR_DOMAIN, KEYBAG_ERR_PASSCODE_SET) {
+                return Err(IdeviceError::UnexpectedResponse(format!(
+                    "device has a passcode set; remove it before fetching an unlock token ({description})"
+                )));
+            }
+            return Err(IdeviceError::UnexpectedResponse(description));
+        }
+        response
+            .get("UnlockToken")
+            .and_then(plist::Value::as_data)
+            .map(|bytes| bytes.to_vec())
+            .ok_or_else(|| {
+                IdeviceError::UnexpectedResponse(
+                    "UnlockToken missing or wrong type in response".into(),
+                )
+            })
+    }
+
+    /// ClearPasscode（go-ios 8df7d2e）：用之前保存的解锁 token 清除设备
+    /// passcode。必须在已 escalate 的连接上调用。
+    pub(crate) async fn clear_passcode(
+        &mut self,
+        unlock_token: Vec<u8>,
+    ) -> Result<(), IdeviceError> {
+        let mut request = plist::Dictionary::new();
+        request.insert("RequestType".into(), "ClearPasscode".into());
+        request.insert("UnlockToken".into(), plist::Value::Data(unlock_token));
+        let response = self.exchange(request).await?;
+        require_acknowledged_redacted(&response, "ClearPasscode")
+    }
+
+    /// ClearRestrictionsPassword（go-ios 8df7d2e）：清除 Screen Time 限制
+    /// PIN，不需要 token，supervisor identity 即可。必须在已 escalate 的
+    /// 连接上调用。
+    pub(crate) async fn clear_screen_time_password(&mut self) -> Result<(), IdeviceError> {
+        let mut request = plist::Dictionary::new();
+        request.insert("RequestType".into(), "ClearRestrictionsPassword".into());
+        let response = self.exchange(request).await?;
+        require_acknowledged_redacted(&response, "ClearRestrictionsPassword")
     }
 
     async fn request_acknowledged(
@@ -492,6 +565,86 @@ fn require_acknowledged(response: &plist::Dictionary, operation: &str) -> Result
     }
 }
 
+const KEYBAG_ERROR_DOMAIN: &str = "DMCKeybagErrorDomain";
+const KEYBAG_ERR_PASSCODE_SET: u64 = 37002;
+
+fn is_acknowledged(response: &plist::Dictionary) -> bool {
+    response.get("Status").and_then(plist::Value::as_string) == Some("Acknowledged")
+}
+
+fn error_chain_code(entry: &plist::Dictionary) -> u64 {
+    entry
+        .get("ErrorCode")
+        .and_then(|value| match value {
+            plist::Value::Integer(integer) => integer
+                .as_unsigned()
+                .or_else(|| integer.as_signed().and_then(|n| u64::try_from(n).ok())),
+            _ => None,
+        })
+        .unwrap_or(0)
+}
+
+fn has_error_code(response: &plist::Dictionary, domain: &str, code: u64) -> bool {
+    response
+        .get("ErrorChain")
+        .and_then(plist::Value::as_array)
+        .is_some_and(|chain| {
+            chain.iter().any(|entry| {
+                entry.as_dictionary().is_some_and(|map| {
+                    map.get("ErrorDomain").and_then(plist::Value::as_string) == Some(domain)
+                        && error_chain_code(map) == code
+                })
+            })
+        })
+}
+
+/// 渲染被拒绝 MCInstall 响应的可操作部分：Status + ErrorChain 的
+/// domain/code/description。绝不格式化整个响应——RequestUnlockToken 响应携带
+/// UnlockToken，ClearPasscode 响应会回显 token，整体输出会把 token 写进每个
+/// 错误日志（go-ios a778c9e 安全约定）。
+fn describe_rejected(operation: &str, response: &plist::Dictionary) -> String {
+    let status = response
+        .get("Status")
+        .and_then(plist::Value::as_string)
+        .unwrap_or("unknown");
+    let mut parts = vec![format!("MCInstall {operation} failed: Status={status}")];
+    if let Some(chain) = response.get("ErrorChain").and_then(plist::Value::as_array) {
+        for entry in chain {
+            let Some(map) = entry.as_dictionary() else {
+                continue;
+            };
+            let domain = map
+                .get("ErrorDomain")
+                .and_then(plist::Value::as_string)
+                .unwrap_or("unknown");
+            let description = map
+                .get("LocalizedDescription")
+                .and_then(plist::Value::as_string)
+                .unwrap_or_default();
+            parts.push(format!(
+                "{domain}({}): {description}",
+                error_chain_code(map)
+            ));
+        }
+    }
+    parts.join("; ")
+}
+
+/// 与 `require_acknowledged` 相同，但拒绝时只输出脱敏的 Status/ErrorChain
+/// 摘要，供携带 token 的 mdm 响应使用。
+fn require_acknowledged_redacted(
+    response: &plist::Dictionary,
+    operation: &str,
+) -> Result<(), IdeviceError> {
+    if is_acknowledged(response) {
+        Ok(())
+    } else {
+        Err(IdeviceError::UnexpectedResponse(describe_rejected(
+            operation, response,
+        )))
+    }
+}
+
 fn profile_list_json(response: &plist::Dictionary) -> Result<JsonValue, IdeviceError> {
     let identifiers = response
         .get("OrderedIdentifiers")
@@ -767,5 +920,83 @@ mod tests {
         assert!(require_wallpaper_acknowledged(&response("Error", Some("Acknowledged"))).is_err());
         assert!(require_wallpaper_acknowledged(&response("Acknowledged", None)).is_err());
         assert!(require_wallpaper_acknowledged(&response("Acknowledged", Some("Error"))).is_err());
+    }
+}
+
+#[test]
+fn mdm_rejection_redaction_hides_token_payloads() {
+    // RequestUnlockToken/ClearPasscode 的拒绝响应会携带或回显 token，
+    // 错误渲染只允许输出 Status/ErrorChain，绝不能格式化整个响应
+    // （go-ios a778c9e 安全约定）。
+    let response = plist::Dictionary::from_iter([
+        ("Status".to_owned(), plist::Value::String("Error".into())),
+        (
+            "UnlockToken".to_owned(),
+            plist::Value::Data(b"top-secret-token".to_vec()),
+        ),
+        (
+            "ErrorChain".to_owned(),
+            plist::Value::Array(vec![plist::Value::Dictionary(
+                plist::Dictionary::from_iter([
+                    (
+                        "ErrorDomain".to_owned(),
+                        plist::Value::String(KEYBAG_ERROR_DOMAIN.into()),
+                    ),
+                    (
+                        "ErrorCode".to_owned(),
+                        plist::Value::Integer(KEYBAG_ERR_PASSCODE_SET.into()),
+                    ),
+                    (
+                        "LocalizedDescription".to_owned(),
+                        plist::Value::String("Passcode set".into()),
+                    ),
+                ]),
+            )]),
+        ),
+    ]);
+    assert!(has_error_code(
+        &response,
+        KEYBAG_ERROR_DOMAIN,
+        KEYBAG_ERR_PASSCODE_SET
+    ));
+    assert!(!has_error_code(&response, "OtherDomain", 1));
+    let rendered = describe_rejected("RequestUnlockToken", &response);
+    assert!(
+        rendered.contains("DMCKeybagErrorDomain(37002)"),
+        "rendered: {rendered}"
+    );
+    assert!(rendered.contains("Passcode set"));
+    assert!(
+        !rendered.contains("top-secret-token"),
+        "token leaked into error: {rendered}"
+    );
+    // 不允许以 JSON 形式输出响应键/值（"UnlockToken" 只允许作为
+    // 操作名 "RequestUnlockToken" 出现在前缀中）。
+    assert!(!rendered.contains("\"UnlockToken\""));
+}
+
+#[test]
+fn mdm_error_code_accepts_signed_and_unsigned_encodings() {
+    for encoded in [
+        plist::Value::Integer(37002u64.into()),
+        plist::Value::Integer(37002i64.into()),
+    ] {
+        let response = plist::Dictionary::from_iter([(
+            "ErrorChain".to_owned(),
+            plist::Value::Array(vec![plist::Value::Dictionary(
+                plist::Dictionary::from_iter([
+                    (
+                        "ErrorDomain".to_owned(),
+                        plist::Value::String(KEYBAG_ERROR_DOMAIN.into()),
+                    ),
+                    ("ErrorCode".to_owned(), encoded),
+                ]),
+            )]),
+        )]);
+        assert!(has_error_code(
+            &response,
+            KEYBAG_ERROR_DOMAIN,
+            KEYBAG_ERR_PASSCODE_SET
+        ));
     }
 }

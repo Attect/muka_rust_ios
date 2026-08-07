@@ -528,6 +528,11 @@ fn redact_command_arguments(arguments: &[String]) -> Vec<String> {
             redacted.push("<redacted>".into());
             continue;
         }
+        // pasteboard set 的文本参数会进入录制，属于设备剪贴板内容。
+        if command == Some("pasteboard") && index == 2 && !argument.starts_with('-') {
+            redacted.push("<redacted>".into());
+            continue;
+        }
         redacted.push(argument.clone());
     }
     redacted

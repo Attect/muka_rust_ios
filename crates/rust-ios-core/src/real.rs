@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::io;
 use std::io::Cursor;
 #[cfg(windows)]
 use std::net::{Ipv6Addr, SocketAddrV6};
@@ -1167,11 +1168,13 @@ impl DeviceBackend for IdeviceBackend {
             }
             "crash" => command_crash(&provider, invocation).await?,
             "profile" => command_profile(&provider, invocation, &mut warnings).await?,
+            "mdm" => command_mdm(&provider, invocation).await?,
             "wifi" => command_wifi(&provider, invocation, &mut warnings).await?,
             "httpproxy" => command_http_proxy(&provider, invocation).await?,
             "prepare" => command_prepare(&provider, invocation, &mut warnings).await?,
             "fsync" => command_fsync(&provider, invocation).await?,
             "file" => command_file(&provider, invocation, tunnel.as_deref()).await?,
+            "pasteboard" => command_pasteboard(invocation, tunnel.as_deref()).await?,
             "install" => {
                 let raw_path = option_value(&invocation.argv, "--path")
                     .or_else(|| invocation.argv.get(1).cloned())
@@ -4754,6 +4757,132 @@ async fn command_erase(
     }))
 }
 
+/// `mdm security-info|fetch-unlock-token|clear-passcode|clear-screen-time-password`
+/// （go-ios v1.2.1 8df7d2e/a778c9e）。全部要求 supervision identity
+/// （`--p12file`），连接后先 escalation 再执行对应 MCInstall 请求。token
+/// 只写入 `--output` 文件（0600）或经 `--output=-` 以 base64 输出到 stdout，
+/// 绝不进入结果 JSON/state/日志。
+async fn command_mdm(
+    provider: &dyn IdeviceProvider,
+    invocation: &CommandInvocation,
+) -> CoreResult<Value> {
+    let action = invocation.argv.get(1).map(String::as_str).ok_or_else(|| {
+        CoreError::InvalidArgument(
+            "mdm requires security-info, fetch-unlock-token, clear-passcode or clear-screen-time-password"
+                .into(),
+        )
+    })?;
+    let raw_p12_path = optional_nonempty_value(&invocation.argv, "--p12file")?
+        .ok_or_else(|| CoreError::InvalidArgument("mdm requires --p12file".into()))?;
+    let p12_path = resolve_client_path(invocation, &raw_p12_path);
+    let p12 = tokio::fs::read(&p12_path).await.map_err(|error| {
+        CoreError::Io(io::Error::new(
+            error.kind(),
+            format!("cannot read {}: {error}", p12_path.display()),
+        ))
+    })?;
+    if p12.len() > MAX_SUPERVISION_IDENTITY_BYTES {
+        return Err(CoreError::InvalidArgument(format!(
+            "supervision identity {} is {} bytes; limit is {MAX_SUPERVISION_IDENTITY_BYTES}",
+            p12_path.display(),
+            p12.len()
+        )));
+    }
+    let password = optional_nonempty_value(&invocation.argv, "--password")?
+        .or_else(|| std::env::var("P12_PASSWORD").ok())
+        .unwrap_or_default();
+    // 设备连接前本地验证 identity，避免把无效 P12 发给设备。
+    certificate_from_identity(&p12, &password).map_err(|error| {
+        CoreError::InvalidArgument(format!(
+            "invalid supervision identity {}: {error}",
+            p12_path.display()
+        ))
+    })?;
+
+    let mut client = McInstallClient::connect(provider)
+        .await
+        .map_err(map_device_error)?;
+    client
+        .escalate(&p12, &password)
+        .await
+        .map_err(map_device_error)?;
+
+    match action {
+        "security-info" => {
+            reject_options(
+                &invocation.argv,
+                &["--output", "--token"],
+                "mdm security-info",
+            )?;
+            let info = client.security_info().await.map_err(map_device_error)?;
+            Ok(json!({
+                "securityInfo": info,
+                "serviceTransport": "lockdown",
+            }))
+        }
+        "fetch-unlock-token" => {
+            let raw_output =
+                optional_nonempty_value(&invocation.argv, "--output")?.ok_or_else(|| {
+                    CoreError::InvalidArgument("mdm fetch-unlock-token requires --output".into())
+                })?;
+            let token = client
+                .fetch_unlock_token()
+                .await
+                .map_err(map_device_error)?;
+            if raw_output == "-" {
+                // base64 stdout 管道输出（go-ios a99646f），token 不落盘。
+                return Ok(json!({
+                    "status": "fetched",
+                    "output": "-",
+                    "bytes": token.len(),
+                    "tokenBase64": BASE64.encode(token),
+                }));
+            }
+            let output = resolve_client_path(invocation, &raw_output);
+            crate::app_store_connect::atomic_write(&output, &token, 0o600)?;
+            Ok(json!({
+                "status": "fetched",
+                "path": output,
+                "bytes": token.len(),
+            }))
+        }
+        "clear-passcode" => {
+            reject_options(&invocation.argv, &["--output"], "mdm clear-passcode")?;
+            let raw_token =
+                optional_nonempty_value(&invocation.argv, "--token")?.ok_or_else(|| {
+                    CoreError::InvalidArgument("mdm clear-passcode requires --token".into())
+                })?;
+            let token_input = resolve_client_path(invocation, &raw_token);
+            let token = tokio::fs::read(&token_input).await.map_err(|error| {
+                CoreError::Io(io::Error::new(
+                    error.kind(),
+                    format!("cannot read {}: {error}", token_input.display()),
+                ))
+            })?;
+            client
+                .clear_passcode(token)
+                .await
+                .map_err(map_device_error)?;
+            Ok(json!({ "status": "cleared", "serviceTransport": "lockdown" }))
+        }
+        "clear-screen-time-password" => {
+            reject_options(
+                &invocation.argv,
+                &["--output", "--token"],
+                "mdm clear-screen-time-password",
+            )?;
+            client
+                .clear_screen_time_password()
+                .await
+                .map_err(map_device_error)?;
+            Ok(json!({ "status": "cleared", "serviceTransport": "lockdown" }))
+        }
+        _ => Err(CoreError::InvalidArgument(format!(
+            "unknown mdm action {action:?}"
+        ))),
+    }
+}
+
 const MAX_WALLPAPER_IMAGE_BYTES: usize = 10 * 1024 * 1024;
 const MAX_SUPERVISION_IDENTITY_BYTES: usize = 4 * 1024 * 1024;
 
@@ -5827,6 +5956,77 @@ async fn command_file(
     }
 }
 
+/// `pasteboard get|set <text>` via the server-owned userspace tunnel's
+/// `com.apple.coredevice.pasteboardservice` (iOS 17+ RemoteXPC). 与 go-ios
+/// v1.2.1 `pasteboard` 命令对齐：get 返回快照文本/条目统计，set 覆盖 general
+/// pasteboard；错误帧（`{"error": {...}}`）必须作为错误返回而不是静默成功。
+async fn command_pasteboard(
+    invocation: &CommandInvocation,
+    tunnel: Option<&dyn UserSpaceTunnel>,
+) -> CoreResult<Value> {
+    let action = invocation
+        .argv
+        .get(1)
+        .map(String::as_str)
+        .ok_or_else(|| CoreError::InvalidArgument("pasteboard requires get or set".into()))?;
+    let tunnel = tunnel.ok_or_else(|| {
+        CoreError::DeviceUnavailable(
+            "pasteboard requires a running server-owned userspace tunnel; run tunnel start --userspace"
+                .into(),
+        )
+    })?;
+    tunnel
+        .ensure_rsd_service(RsdServiceKind::Pasteboard)
+        .await?;
+    let stream = tunnel
+        .connect_rsd_service(RsdServiceKind::Pasteboard)
+        .await?;
+    let stream: Box<dyn idevice::ReadWrite> = Box::new(stream);
+    let mut client = idevice::core_device::PasteboardServiceClient::from_stream(stream)
+        .await
+        .map_err(map_device_error)?;
+    match action {
+        "get" => {
+            let snapshot = client
+                .get(idevice::core_device::GENERAL_PASTEBOARD)
+                .await
+                .map_err(map_device_error)?;
+            let image = snapshot.image();
+            Ok(json!({
+                "pasteboard": idevice::core_device::GENERAL_PASTEBOARD,
+                "changeCount": snapshot.change_count,
+                "text": snapshot.text(),
+                "items": snapshot.items.len(),
+                "imageUti": image.as_ref().map(|(uti, _)| *uti),
+                "imageBytes": image.as_ref().map(|(_, bytes)| bytes.len()),
+                "promisedItems": snapshot.promised_items().len(),
+                "serviceTransport": "shared_rsd",
+            }))
+        }
+        "set" => {
+            // 文本只作为命令参数传入，不回显到结果 JSON，避免剪贴板内容
+            // 进入日志/state/recording。
+            let text = invocation
+                .argv
+                .get(2)
+                .filter(|value| !value.starts_with('-'))
+                .ok_or_else(|| CoreError::InvalidArgument("pasteboard set requires text".into()))?;
+            client
+                .set_text(text, idevice::core_device::GENERAL_PASTEBOARD)
+                .await
+                .map_err(map_device_error)?;
+            Ok(json!({
+                "status": "set",
+                "pasteboard": idevice::core_device::GENERAL_PASTEBOARD,
+                "serviceTransport": "shared_rsd",
+            }))
+        }
+        _ => Err(CoreError::InvalidArgument(format!(
+            "unknown pasteboard action {action:?}"
+        ))),
+    }
+}
+
 #[derive(Debug, Default)]
 struct TransferSummary {
     files: usize,
@@ -6017,16 +6217,9 @@ async fn command_afc(
     provider: &dyn IdeviceProvider,
     invocation: &CommandInvocation,
 ) -> CoreResult<idevice::afc::AfcClient> {
-    if option_value(&invocation.argv, "--app-group").is_some() {
-        return Err(CoreError::NotImplemented(
-            "AFC app-group containers are not implemented in v0.1".into(),
-        ));
-    }
-    if has_flag(&invocation.argv, "--crash") || has_flag(&invocation.argv, "--temp") {
-        return Err(CoreError::NotImplemented(
-            "AFC crash/temp roots are not implemented in v0.1".into(),
-        ));
-    }
+    // 注意：--app-group/--crash/--temp 的 domain 选择由 command_file 的
+    // parse_selection + FileService 路径处理，不会到达这里（v0.1 的
+    // not_implemented gates 已随 FileService 迁移移除）。
     if let Some(bundle_id) = option_value(&invocation.argv, "--app") {
         let house = idevice::house_arrest::HouseArrestClient::connect(provider)
             .await
@@ -6493,7 +6686,15 @@ fn map_usbmuxd_error(error: idevice::IdeviceError) -> CoreError {
 
 fn map_device_error(error: idevice::IdeviceError) -> CoreError {
     let message = error.to_string();
-    if message.to_ascii_lowercase().contains("pair") {
+    // 设备锁定（passcode screen）时 Lockdown 返回 DeviceLocked/PasswordProtected；
+    // 这是可恢复的明确状态，不是泛化设备不可用（go-ios v1.2.1 区分两者，
+    // 配对被推迟时 exit 2）。
+    if matches!(
+        error,
+        idevice::IdeviceError::DeviceLocked | idevice::IdeviceError::PasswordProtected
+    ) {
+        CoreError::DeviceLocked(message)
+    } else if message.to_ascii_lowercase().contains("pair") {
         CoreError::PairingRequired(message)
     } else {
         CoreError::DeviceUnavailable(message)

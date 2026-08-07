@@ -34,7 +34,7 @@ go-ios 兼容命令入口（迁移状态见 docs/feature-matrix.md）：
   activate apps assistivetouch ax batterycheck batteryregistry crash date debug
   devicename devicestate devmode diagnostics diskspace dproxy erase file fsync
   httpproxy image info install instruments ip kill lang launch lockdown
-  memlimitoff mobilegestalt pair pcap prepare profile ps readpair reboot resetax
+  mdm memlimitoff mobilegestalt pair pasteboard pcap prepare profile ps readpair reboot resetax
   resetlocation rsd runtest runwda runxctest screenshot sign setlocation
   setlocationgpx shutdown set-wallpaper get-app-icon get-wallpaper get-icon-layout
   set-icon-layout syslog ostrace sysmontap timeformat tunnel ui uninstall
@@ -355,6 +355,14 @@ fn print_legacy_command_help(command: &str) {
         "file" => (
             "ios file (ls|pull|push) [options]",
             "Access AFC or an app container.",
+        ),
+        "pasteboard" => (
+            "ios pasteboard (get|set <text>) [options]",
+            "Read or replace the device pasteboard (iOS 17+, requires a userspace tunnel).",
+        ),
+        "mdm" => (
+            "ios mdm (security-info|fetch-unlock-token|clear-passcode|clear-screen-time-password) --p12file=<file> [--password=<pw>] [--output=<file>] [--token=<file>]",
+            "Supervised MDM passcode/Screen Time management (requires a supervision identity).",
         ),
         "get-icon-layout" => (
             "ios get-icon-layout [--output=<file>] [options]",
@@ -2437,6 +2445,13 @@ fn exit_code(error: &anyhow::Error) -> u8 {
     match error.downcast_ref::<ClientError>() {
         Some(ClientError::Protocol(protocol))
             if protocol.code == rust_ios_protocol::ErrorCode::NotImplemented =>
+        {
+            2
+        }
+        // 设备锁定导致配对被推迟：解锁后重试即可，与普通失败区分
+        // （go-ios v1.2.1 ExitCodeDeviceLocked）。
+        Some(ClientError::Protocol(protocol))
+            if protocol.code == rust_ios_protocol::ErrorCode::DeviceLocked =>
         {
             2
         }

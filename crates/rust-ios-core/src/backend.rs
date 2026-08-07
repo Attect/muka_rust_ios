@@ -62,6 +62,7 @@ pub enum RsdServiceKind {
     DeviceInfo,
     FileServiceControl,
     FileServiceData,
+    Pasteboard,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -84,6 +85,7 @@ impl RsdServiceKind {
             Self::DeviceInfo => "com.apple.coredevice.deviceinfo",
             Self::FileServiceControl => "com.apple.coredevice.fileservice.control",
             Self::FileServiceData => "com.apple.coredevice.fileservice.data",
+            Self::Pasteboard => "com.apple.coredevice.pasteboardservice",
         }
     }
 }

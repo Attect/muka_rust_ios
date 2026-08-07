@@ -13,6 +13,8 @@ pub enum CoreError {
     DeviceUnavailable(String),
     #[error("pairing required: {0}")]
     PairingRequired(String),
+    #[error("device is locked: {0}")]
+    DeviceLocked(String),
     #[error("permission denied: {0}")]
     PermissionDenied(String),
     #[error("operation is not implemented: {0}")]
@@ -50,6 +52,7 @@ impl From<CoreError> for ProtocolError {
             CoreError::DeviceNotFound(_) => ErrorCode::DeviceNotFound,
             CoreError::DeviceUnavailable(_) => ErrorCode::DeviceUnavailable,
             CoreError::PairingRequired(_) => ErrorCode::PairingRequired,
+            CoreError::DeviceLocked(_) => ErrorCode::DeviceLocked,
             CoreError::PermissionDenied(_) => ErrorCode::PermissionDenied,
             CoreError::NotImplemented(_) => ErrorCode::NotImplemented,
             CoreError::UnsupportedPlatform(_) => ErrorCode::UnsupportedPlatform,

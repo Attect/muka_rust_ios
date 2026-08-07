@@ -540,7 +540,7 @@ fn encode_p12(
         .map_err(|error| CoreError::Backend(format!("encode signing P12: {error}")))
 }
 
-fn atomic_write(path: &Path, bytes: &[u8], mode: u32) -> CoreResult<()> {
+pub(crate) fn atomic_write(path: &Path, bytes: &[u8], mode: u32) -> CoreResult<()> {
     prepare_output_path(path, "output")?;
     let parent = path.parent().expect("output parent was validated");
     let file_name = path

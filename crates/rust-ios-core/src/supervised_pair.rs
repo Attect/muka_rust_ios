@@ -225,12 +225,20 @@ fn pairing_escrow_bag(response: plist::Value) -> CoreResult<Vec<u8>> {
             "supervised Pair failed: {error}"
         )));
     }
+    // 无 Error 但也没有 EscrowBag：设备接受了 supervisor identity，但
+    // passcode screen 激活时无法更新 trust store/生成 escrow bag。此时
+    // 不得保存任何 pair record（用新生成的证书覆盖工作中的 record 会损坏
+    // 现有配对），并向调用方报告"被推迟"而不是成功（go-ios v1.2.1
+    // ErrDeviceLockedPairingDeferred）。
     response
         .get("EscrowBag")
         .and_then(plist::Value::as_data)
         .map(ToOwned::to_owned)
         .ok_or_else(|| {
-            CoreError::PairingRequired("supervised Pair response missing EscrowBag".into())
+            CoreError::DeviceLocked(
+                "supervised pairing was accepted but no pair record could be persisted; unlock the device once and pair again"
+                    .into(),
+            )
         })
 }
 
@@ -386,5 +394,29 @@ mod tests {
         assert!(!pair_record.contains_key("HostPrivateKey"));
         assert!(!pair_record.contains_key("RootPrivateKey"));
         assert_eq!(pair_record.len(), 5);
+    }
+    #[test]
+    fn locked_device_without_escrow_bag_is_deferred_not_success() {
+        // 设备接受 supervisor identity 但 passcode screen 激活时无法生成
+        // EscrowBag：go-ios v1.2.1 把这种情况报告为"配对推迟"（exit 2），
+        // 而不是成功或泛化失败。
+        let response = plist::Value::Dictionary(plist::Dictionary::from_iter([(
+            "Status".to_owned(),
+            plist::Value::String("Success".into()),
+        )]));
+        let error = pairing_escrow_bag(response).unwrap_err();
+        assert!(
+            matches!(error, CoreError::DeviceLocked(_)),
+            "expected DeviceLocked, got {error:?}"
+        );
+        assert!(error.to_string().contains("unlock the device once"));
+
+        // 显式 Error 仍是普通配对失败。
+        let rejected = plist::Value::Dictionary(plist::Dictionary::from_iter([(
+            "Error".to_owned(),
+            plist::Value::String("UserDeniedPairing".into()),
+        )]));
+        let error = pairing_escrow_bag(rejected).unwrap_err();
+        assert!(matches!(error, CoreError::PairingRequired(_)));
     }
 }
