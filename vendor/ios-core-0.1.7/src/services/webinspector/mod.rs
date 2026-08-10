@@ -1673,6 +1673,35 @@ fn normalized_locator(by: By, value: &str) -> (String, String) {
     }
 }
 
+/// RSD checkin handshake required by `*.shim.remote` services on iOS 17+:
+/// exchange an `RSDCheckin` plist request and consume the two response
+/// messages (go-ios `RsdCheckin`). Without it the device closes the shim
+/// connection immediately, which iOS 26 surfaces as an EOF right after
+/// connect. Must run before any webinspector traffic on the stream.
+pub async fn rsd_checkin<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
+) -> Result<(), WebInspectorError> {
+    let request = plist::Value::Dictionary(plist::Dictionary::from_iter([
+        (
+            "Label".to_owned(),
+            plist::Value::String("rust-ios".into()),
+        ),
+        (
+            "ProtocolVersion".to_owned(),
+            plist::Value::String("2".into()),
+        ),
+        (
+            "Request".to_owned(),
+            plist::Value::String("RSDCheckin".into()),
+        ),
+    ]));
+    send_plist(stream, &request).await?;
+    // checkin response, then the start-service message
+    recv_plist(stream).await?;
+    recv_plist(stream).await?;
+    Ok(())
+}
+
 async fn send_plist<S: AsyncWrite + Unpin>(
     stream: &mut S,
     value: &plist::Value,
@@ -2243,5 +2272,45 @@ mod tests {
             }))
             .unwrap();
         assert_eq!(session.target_id(), Some("target-2"));
+    }
+    #[tokio::test]
+    async fn rsd_checkin_exchanges_three_messages() {
+        // go-ios RsdCheckin：发送 RSDCheckin 请求后必须消费两条响应消息。
+        // 设备侧模拟：读请求、回两条 plist。
+        let (client, mut server) = duplex(64 * 1024);
+        let checkin = tokio::spawn(async move {
+            let mut stream = client;
+            rsd_checkin(&mut stream).await
+        });
+
+        let request = recv_plist(&mut server).await.unwrap();
+        assert_eq!(
+            request.get("Request").and_then(plist::Value::as_string),
+            Some("RSDCheckin")
+        );
+        assert_eq!(
+            request.get("ProtocolVersion").and_then(plist::Value::as_string),
+            Some("2")
+        );
+        send_plist(
+            &mut server,
+            &plist::Value::Dictionary(plist::Dictionary::from_iter([(
+                "Status".to_owned(),
+                plist::Value::String("OK".into()),
+            )])),
+        )
+        .await
+        .unwrap();
+        send_plist(
+            &mut server,
+            &plist::Value::Dictionary(plist::Dictionary::from_iter([(
+                "Message".to_owned(),
+                plist::Value::String("start service".into()),
+            )])),
+        )
+        .await
+        .unwrap();
+
+        checkin.await.unwrap().expect("checkin must succeed");
     }
 }

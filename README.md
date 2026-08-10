@@ -178,9 +178,10 @@ cargo build --workspace --release
 - `debug <app_path>`、WebInspector js-shell、supervised pairing、unit XCTest 与 test filters 已接入，
   其中 app debug 与 unit/filter 完整真机运行仍需设备测试；MCInstall supervision escalation 已接入。
 - mdm 四子命令与 pasteboard 已完成实现和 mock/离线测试；pasteboard 已通过 iOS 26 真机闭环，
-  mdm 完整真机验证需要 supervision identity 资产与监督设备。
-- WebInspector page list/eval/CDP 真机验证仍被设备"Web 检查器"设置关闭阻塞；RemotePairing 真机
-  数据面仍受 Windows 缺少 iPhone IPv6/link-local interface 阻塞；App Store Connect 需真实 Apple 账号。
+  mdm 完整真机验证需要 supervision identity 资产与监督设备（未监督设备拒绝路径已真机验证）。
+- WebInspector list/eval/cdp/js-shell 已通过 iOS 26 真机闭环（2026-08-10 修复了缺失的
+  RSDCheckin shim 握手）；RemotePairing 真机数据面仍被设备未广告 `_remoted._tcp` 阻塞
+  （网络层已排除）；App Store Connect 需真实 Apple 账号。
 
 ## 实现说明
 

@@ -735,3 +735,23 @@ State changed:
 Result:
 Notes:
 ```
+### 2026-08-10 WebInspector RSDCheckin 修复与 mdm/RemotePairing 验证
+
+使用本仓库 release `ios.exe`（28,806,656 bytes，2026-08-10 构建，含 RSDCheckin 修复）、
+workspace 内隔离绝对 home 和动态 IPC port。设备为文档同一台 `测试 iPhone / iOS 26.5.2 / 23F84`，
+USB 连接；用户已开启 iOS 26 新路径的 Web 检查器与远程自动化
+（设置 > App > Safari浏览器 > 高级）并保持 Safari 打开必应页面。
+
+| 检查 | 实际结果 | 结论 |
+|---|---|---|
+| `mdm security-info`（自签名 identity） | 设备返回 `Status: CertificateRejected` 结构化错误，未改变设备状态；identity 用后即删 | passed（未监督设备拒绝路径；完整写路径仍需监督设备 + 受信任 identity） |
+| WebInspector 根因 | rust-ios 连接 `com.apple.webinspector.shim.remote` 后未执行 RSDCheckin 握手（go-ios `RsdCheckin` 发送 `RSDCheckin` plist 并消费两条响应），iOS 26 设备立即 EOF → 误报 "Web Inspector is unavailable"；go-ios 对照在同一设备成功 | fixed；`rsd_checkin` 已加入 vendored ios-core 并在 `connect_service` tunnel 路径调用 |
+| `webinspector list` | 返回 Safari 必应页面（与 go-ios 输出一致），`automationAvailability=WIRAutomationAvailabilityAvailable` | passed |
+| `webinspector eval 1 "1+1"` / `document.title` | `2` / `"搜索 - Microsoft 必应"` | passed |
+| `webinspector cdp --port 0` | task running，runtime `endpoint=127.0.0.1:54009`；`/json` discovery 返回 1 个 page target；page WebSocket 完成 `Runtime.enable` + `Runtime.evaluate` 返回页面标题 | passed |
+| `webinspector js-shell` | stdin `1+1`/`JSON.stringify({a:1})` 输出 NDJSON 结果，`.exit` 后 task 清理为 0 | passed（需先停 CDP task：同设备 webinspector 连接互斥，占用时 js-shell 启动超时而非明确拒绝——已记录为可改进点） |
+| RemotePairing 网络层 | iPhone 同网（<device-lan-ip>，单播 ping 2ms）；mDNS 环境验证正常（join 组后可收多播）；`tunnel pair --manual` 与单播/多播 mDNS 探测均无 remoted 实例 | blocked by device-side advertising（网络阻塞已排除，iOS 26 设备未广告 `_remoted._tcp`，host 侧不可解） |
+| cleanup | 各隔离 server `task stop all` + `kill-server`；IPC/CDP 端口无 listener；无 `ios.exe` 进程残留 | passed |
+
+本轮未执行：erase/shutdown/set-wallpaper/supervised pair/mdm 写路径（设备未监督）、
+Wintun（非管理员）、App Store Connect（无真实账号）。

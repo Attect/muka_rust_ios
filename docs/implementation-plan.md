@@ -27,7 +27,7 @@
 | P4 task manager | complete for current task kinds | list/show/stop/restart/output、原子 state、退避/恢复；dproxy active connection 取消与超时 supervisor abort 已测 |
 | P5 forward | implemented | echo、冲突、并发、强杀恢复；iOS 26 Lockdown 真机转发通过 |
 | P6 tunnel | partial | iOS 26 USB userspace lifecycle/RSD/restart 通过；RemotePairing TCP 离线闭环完成但真机 mDNS 受 host interface 阻塞；Windows Wintun lifecycle/packet pump 离线通过，提权真机数据面待测 |
-| P7 命令迁移 | in progress | 矩阵已无 planned；pasteboard 真机闭环通过（iOS 26）；mdm 四子命令 offline 完成待 supervision 资产；完整矩阵仍有 device-test-needed 项 |
+| P7 命令迁移 | in progress | 矩阵已无 planned；pasteboard 真机闭环通过（iOS 26）；mdm 四子命令 offline 完成 + 未监督设备拒绝路径真机通过；WebInspector list/eval/cdp/js-shell 真机闭环通过（修复 RSDCheckin 握手）；完整矩阵仍有 device-test-needed 项 |
 | P8 验证/文档 | in progress | 233 workspace tests、shared XCTest 专项 process smoke、多套隔离 process/compat smoke、Windows/iOS 26 多轮真机记录；ASC 真实账号、RemotePairing/macOS/Linux 矩阵待做 |
 
 `complete` 只描述该阶段列出的当前架构交付，不表示 go-ios 全功能目标完成。整体 goal 在功能矩阵

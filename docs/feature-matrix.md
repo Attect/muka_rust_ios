@@ -141,9 +141,9 @@
 | `ui tap/swipe/longpress/type/button` | offline-tested | DeviceKit RPC；WDA lazy/explicit session 与 action endpoint |
 | `ui screenshot/source/size/orientation/app` | offline-tested | client-relative 文件输出；binary stdout 明确拒绝 |
 | `ui stream` | implemented | server-owned MJPEG/H264 HTTP capture；WDA 独立 MJPEG bridge、task output、动态 URL 跟随、stop/restart iOS 26 真机通过；DeviceKit H264 离线通过 |
-| `webinspector list/launch/eval` | device-test-needed | `ios-core 0.1.7` WebInspector；Lockdown/iOS 17+ shared RSD、page key、target bridge、Remote Automation、mock/replay/process smoke；iOS 26 已到达 service，但设备设置关闭，待开启后完成 page/eval 验证 |
-| `webinspector cdp` | offline-tested | 同一 task/设备 connection、Chrome discovery、Inspector bridge、mock command/response 和恢复测试；iOS 26 设置开启后待真机 |
-| `webinspector js-shell` | device-test-needed | Web/WebPage/JavaScript page 选择、可选 Safari launch/navigation、持续 Runtime.evaluate；iOS 26 Web Inspector 设置开启后待真机 |
+| `webinspector list/launch/eval` | implemented | `ios-core 0.1.7` WebInspector；Lockdown/iOS 17+ shared RSD；**2026-08-10 修复缺少 RSDCheckin 握手**（shim service 连接后必须交换 `RSDCheckin` plist 并消费两条响应，否则 iOS 26 立即 EOF）；iOS 26 真机 list/eval 闭环通过（Safari 必应页面、`1+1`→`2`、`document.title`） |
+| `webinspector cdp` | implemented | 同一 task/设备 connection、Chrome discovery、Inspector bridge、mock command/response 和恢复测试；iOS 26 真机 `/json` 发现 1 个 page target，page WebSocket `Runtime.enable`/`Runtime.evaluate` 返回页面标题；stop 释放端口 |
+| `webinspector js-shell` | implemented | Web/WebPage/JavaScript page 选择、可选 Safari launch/navigation、持续 Runtime.evaluate；iOS 26 真机 stdin eval NDJSON 输出与 `.exit` 清理通过；同设备与 CDP task 互斥（占用时启动超时，可改进为明确 conflict） |
 | `assistivetouch/voiceover/zoom` | implemented | `com.apple.Accessibility`；iOS 11 gate、`--force`、读回校验；iOS 26 三项均完成 `false -> true -> false` 真机恢复闭环 |
 | `ax audit` | implemented | Accessibility DTX；AX API v20/v21 selector、issue/rect/platform element/label、Lockdown TLS handshake-only；iOS 26 API v26 两次 completion 真机通过 |
 | `resetax` | offline-tested | `deviceResetToDefaultAccessibilitySettings` 已接入；会修改用户设置，不在普通真机 smoke 中执行 |
@@ -170,7 +170,7 @@
 | 能力 | 状态 | 当前范围 |
 |---|---|---|
 | `pasteboard get/set <text>` | implemented | iOS 17+ `com.apple.coredevice.pasteboardservice` RemoteXPC（server-owned shared RSD）；get 返回文本/条目统计，set 覆盖 general pasteboard 且不回显内容；`{"error":{...}}` 帧作为错误返回（对齐 go-ios 1317039）；iOS 26 真机 get/set/读回/恢复闭环通过，缺 tunnel 返回结构化错误 |
-| `mdm security-info` | offline-tested | MCInstall `SecurityInfo`（go-ios a778c9e）；只读 passcode 存在性/策略合规/锁屏宽限/硬件加密；要求 supervision identity 先 escalation；错误只渲染 Status/ErrorChain 摘要，绝不输出携带 token 的整个响应 |
+| `mdm security-info` | offline-tested | MCInstall `SecurityInfo`（go-ios a778c9e）；只读 passcode 存在性/策略合规/锁屏宽限/硬件加密；要求 supervision identity 先 escalation；错误只渲染 Status/ErrorChain 摘要，绝不输出携带 token 的整个响应；2026-08-10 真机未监督设备返回结构化 `CertificateRejected`（拒绝路径通过，写路径待监督设备） |
 | `mdm fetch-unlock-token` | offline-tested | MCInstall `RequestUnlockToken`；token 写入 `--output`（0600）或 `--output=-` base64 stdout；无 passcode 时 DMCKeybagErrorDomain 37002 映射为明确错误；真机未监督设备路径待 supervision 资产 |
 | `mdm clear-passcode` | offline-tested | MCInstall `ClearPasscode` + `--token` 文件；错误渲染脱敏（ClearPasscode 响应会回显 token） |
 | `mdm clear-screen-time-password` | offline-tested | MCInstall `ClearRestrictionsPassword`；无需 token，supervisor identity 即可 |
@@ -179,8 +179,9 @@
 ## 已知协议限制
 
 - userspace tunnel 默认使用 USB `CoreDeviceProxy`；`--remote-pairing` 使用独立 RemotePairing
-  identity/TCP transport。后者尚未完成真机数据面验证，当前 Windows 环境在 `_remoted._tcp` mDNS
-  发现前缺少 iPhone IPv6/link-local interface；不得以 mock echo 代替真机通过。
+  identity/TCP transport。2026-08-10 已排除网络层阻塞（iPhone 与主机同网、单播可达、mDNS 环境
+  正常），剩余阻塞是设备未广告 `_remoted._tcp`（iOS 26 设备侧条件，host 侧不可解）；不得以
+  mock echo 代替真机通过。
 - iOS 17+ DVT、`launch --wait` AppService/OpenStdio、WDA、UI runner 与 XCTest 均可复用同设备 active
   tunnel provider。WDA/XCTest 没有 active tunnel 时保留 task-owned `dedicated_core_device` fallback；
   runtime 和 info 级 transport log 会明确区分两条路径。

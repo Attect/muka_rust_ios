@@ -469,9 +469,15 @@ async fn connect_service(
     tunnel: Option<&dyn UserSpaceTunnel>,
 ) -> CoreResult<(BoxedIo, ServiceTransport)> {
     if let Some(tunnel) = tunnel {
-        let stream = tunnel
+        let mut stream = tunnel
             .connect_rsd_service(RsdServiceKind::WebInspector)
             .await?;
+        // iOS 17+ 的 `*.shim.remote` service 连接后必须先交换 RSDCheckin
+        // plist 消息（go-ios `RsdCheckin`），否则 iOS 26 设备会立即关闭连接
+        // （表现为 connect 后 EOF/"Web Inspector is unavailable"）。
+        ios_device_core::webinspector::rsd_checkin(&mut stream)
+            .await
+            .map_err(map_webinspector_error)?;
         return Ok((stream, ServiceTransport::SharedRsd));
     }
 
