@@ -537,6 +537,17 @@ impl TaskManager {
                     spec.udid, record.id
                 )));
             }
+            // 同设备的 CDP 与 JS shell 互斥：webinspector service 每设备只允许
+            // 一个连接，占用时第二个连接会被设备挂起直到超时（2026-08-10 真机
+            // 观察到 js-shell 在 CDP 运行时 20 秒超时而非明确失败）。
+            if let TaskSpec::WebInspectorJsShell(existing) = &record.spec
+                && device_selectors_overlap(&existing.udid, &spec.udid)
+            {
+                return Err(TaskManagerError::Conflict(format!(
+                    "device selector {:?} already has WebInspector JS shell task {}; the webinspector service allows a single connection per device",
+                    spec.udid, record.id
+                )));
+            }
             if let Some((host, port)) = listening_endpoint(&record.spec)
                 && host == spec.bind_host
                 && port == spec.port
@@ -592,6 +603,16 @@ impl TaskManager {
             {
                 return Err(TaskManagerError::Conflict(format!(
                     "device selector {:?} already has WebInspector JS shell task {}",
+                    spec.udid, existing.id
+                )));
+            }
+            // 同设备的 CDP 与 JS shell 互斥：webinspector service 每设备只允许
+            // 一个连接（见 start_web_inspector_cdp 的注释）。
+            if let TaskSpec::WebInspectorCdp(existing_spec) = &existing.spec
+                && device_selectors_overlap(&existing_spec.udid, &spec.udid)
+            {
+                return Err(TaskManagerError::Conflict(format!(
+                    "device selector {:?} already has WebInspector CDP task {}; the webinspector service allows a single connection per device",
                     spec.udid, existing.id
                 )));
             }
@@ -7584,6 +7605,47 @@ mod tests {
         TcpListener::bind(&endpoint)
             .await
             .expect("CDP port should be released");
+    }
+
+    #[tokio::test]
+    async fn webinspector_cdp_and_js_shell_are_mutually_exclusive_per_device() {
+        let directory = tempfile::tempdir().unwrap();
+        let backend = MockDeviceBackend::new();
+        backend.attach_usb("mock-phone").await;
+        let manager = manager(backend.clone(), &directory.path().join("state.json")).await;
+
+        // CDP 运行时启动 js-shell：必须立即 conflict，而不是等设备侧超时
+        // （2026-08-10 真机观察到占用时 20 秒超时）。
+        let cdp = manager
+            .start_webinspector_cdp(webinspector_cdp_spec())
+            .await
+            .unwrap();
+        wait_state(&manager, cdp.id, RuntimeState::Running).await;
+        let conflict = manager
+            .start_webinspector_js_shell(webinspector_js_shell_spec())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&conflict, TaskManagerError::Conflict(message) if message.contains("already has WebInspector CDP task")),
+            "expected Conflict, got {conflict:?}"
+        );
+        manager.stop(TaskSelector::Id(cdp.id)).await.unwrap();
+
+        // js-shell 运行时启动 CDP：同样立即 conflict。
+        let shell = manager
+            .start_webinspector_js_shell(webinspector_js_shell_spec())
+            .await
+            .unwrap();
+        wait_state(&manager, shell.id, RuntimeState::Running).await;
+        let conflict = manager
+            .start_webinspector_cdp(webinspector_cdp_spec())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&conflict, TaskManagerError::Conflict(message) if message.contains("already has WebInspector JS shell task")),
+            "expected Conflict, got {conflict:?}"
+        );
+        manager.stop(TaskSelector::Id(shell.id)).await.unwrap();
     }
 
     #[tokio::test]

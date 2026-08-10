@@ -755,3 +755,19 @@ USB 连接；用户已开启 iOS 26 新路径的 Web 检查器与远程自动化
 
 本轮未执行：erase/shutdown/set-wallpaper/supervised pair/mdm 写路径（设备未监督）、
 Wintun（非管理员）、App Store Connect（无真实账号）。
+### 2026-08-10 续：webinspector launch 补测与 CDP/js-shell 互斥改进
+
+同一设备（测试 iPhone / iOS 26.5.2），release `ios.exe`（28,806,656 bytes，2026-08-10 构建，
+含互斥改进）、隔离 home 与动态 IPC port。
+
+| 检查 | 实际结果 | 结论 |
+|---|---|---|
+| `webinspector launch https://www.apple.com` | RSDCheckin 修复后补测：返回 `{"bundleID":"com.apple.mobilesafari","title":"Apple","url":"https://www.apple.com/"}`，远程自动化路径可用 | passed |
+| CDP 运行时启动 js-shell | **立即**返回 `{"code":"conflict", ..."already has WebInspector CDP task ...; the webinspector service allows a single connection per device"}`，不再是 20 秒超时 | passed（互斥改进，task manager Conflict 语义） |
+| 停止 CDP 后 js-shell | `2+2` → `4` 正常执行，互斥不误伤 | passed |
+| js-shell 结束后 CDP | `running`，新动态端口 54891 正常提供服务 | passed |
+| cleanup | `task stop all` + `kill-server`；IPC/CDP 端口无 listener；无 `ios.exe` 残留 | passed |
+
+互斥实现：`start_webinspector_cdp` 与 `start_webinspector_js_shell` 互相检查同设备
+`WebInspectorJsShell`/`WebInspectorCdp` task，返回 `TaskManagerError::Conflict`；
+server 单测新增双向互斥用例（8/8 通过）。
