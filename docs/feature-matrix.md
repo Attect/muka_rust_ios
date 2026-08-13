@@ -59,7 +59,7 @@
 | `screenshot --stream [--port]` | intentionally-changed | server 托管 MJPEG listener；iOS 26 shared RSD 返回 multipart/JPEG，stop/restart/offline 恢复已测 |
 | `instruments notifications`, `sysmontap` | intentionally-changed | iOS 26 shared RSD 真机写入 JSONL；sysmontap attributes/嵌套 batch、task output、stop/restart 已测 |
 | `debug proxy [--bind/--port]` | intentionally-changed | server-owned GDB remote listener，复用 tunnel RSD service；iOS 26 `qSupported`、server restart、DDI 缺失 waiting 真机通过 |
-| `debug [--stop-at-entry] <app_path>` | device-test-needed | typed app/installation_proxy preflight、Windows extended path 清理、前台 LLDB source、client-owned IPC lease；两套 process smoke 与真实 arm64 iOS Mach-O/Windows `remote-ios` target 通过，完整设备 launch 待设备重新连接 |
+| `debug [--stop-at-entry] <app_path>` | device-test-needed | typed app/installation_proxy preflight、Windows extended path 清理、前台 LLDB source、client-owned IPC lease；2026-08-13 真机完成 preflight（设备已安装 Runner 路径解析）、debug.lldb 执行（remote-ios platform、arm64 target）、debug proxy task 建立与断连清理；**Windows 官方 LLVM lldb 不支持 `process connect`（无 gdb-remote 插件）**，完整 launch 需支持 gdb-remote 的 lldb 构建 |
 | `dproxy [--binary] [--mode] [--bind/--port/--upstream/--output]` | intentionally-changed | Windows 使用强制 loopback 的显式 server-owned usbmuxd endpoint，不移动 Apple socket；双向 raw、初始 plist/redaction、半关闭、fake upstream、output、stop/restart/restore/端口释放已测；utun、系统级拦截和 DTX decode 未实现 |
 | `webinspector cdp` | offline-tested | server-owned Axum `/json` discovery/page WebSocket；单活动连接、stop 释放、server restart 与两套 process smoke |
 | `webinspector js-shell` | offline-tested | server-owned Inspector session、串行 eval input、NDJSON result/error、stop close、server interruption 不重放；mock CLI/process smoke 通过 |
@@ -131,9 +131,9 @@
 | 命令族 | 状态 | 计划归属 |
 |---|---|---|
 | `runwda` | implemented | iOS 26 custom runner、HTTP/MJPEG bridge、health/stop/server restart 真机通过；active tunnel 下 runtime `shared_rsd`，XCTest NDJSON capture 真机 194 条/64,055 bytes；transport log 证明未创建第二套 CoreDeviceProxy |
-| `runtest` XCUITest | device-test-needed | server-owned finite task、NDJSON event/summary、completed/failed、显式 restart；iOS 26 WDA runner event path/stop 通过，缺少自然结束的普通 runner |
+| `runtest` XCUITest | implemented | server-owned finite task、NDJSON event/summary、completed/failed、显式 restart；**2026-08-13 真机完整 completion 闭环**：WDA 项目 `IntegrationTests_1`（会自然结束的普通 UI 测试 runner）构建并安装后自然结束，`completed: 3 passed, 56 failed, 0 skipped`，7058 条 NDJSON 事件（case/test_plan/target 生命周期完整）；56 失败为 WDA IntegrationTests 测试代码对 iOS 26 的兼容问题（非 rust-ios） |
 | `runxctest` | offline-tested | binary/XML `.xctestrun` v1/v2、多 target 串行、target app name resolution；真机普通 bundle 待测 |
-| unit XCTest、test filters | device-test-needed | 受控 `idevice 0.1.65` fork 注入 `libXCTestBundleInject.dylib`、关闭 UI activate/initialize，并编码 `NSSet` + `XCTTestIdentifierSet`；mock/task/archive 测试通过，普通 unit/filter bundle 真机待测 |
+| unit XCTest、test filters | device-test-needed | 受控 `idevice 0.1.65` fork 注入 `libXCTestBundleInject.dylib`、关闭 UI activate/initialize，并编码 `NSSet` + `XCTTestIdentifierSet`；mock/task/archive 测试通过；2026-08-13 真机推进：WDA `UnitTests`+`IntegrationApp` host 构建/签名/嵌入修复完成，go-ios 对照已到测试执行阶段（环境就绪），rust-ios fork 的 iOS 26 testmanagerd 会话握手（host 未连接）需 vendored DTX 层专项调试 |
 | `ui download` | offline-tested | host-only streaming download、原子替换、WDA ZIP 安全解压；默认 WDA/DeviceKit URL 与参考一致 |
 | `ui install` | device-test-needed | `.app/.ipa/.zip`、CMS profile/P12/UDID/bundle 校验、纯 Rust 重签名后 installation_proxy；mock process smoke 完成 |
 | `ui run` | implemented | WDA/DeviceKit server-owned XCUITest runner、固定 target transport、health、forward、NDJSON log、stop/restart/restore；shared RSD 注入已通过 process smoke，iOS 26 WDA 真机通过，DeviceKit 未安装故保持离线验证 |
