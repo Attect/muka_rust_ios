@@ -771,3 +771,30 @@ Wintun（非管理员）、App Store Connect（无真实账号）。
 互斥实现：`start_webinspector_cdp` 与 `start_webinspector_js_shell` 互相检查同设备
 `WebInspectorJsShell`/`WebInspectorCdp` task，返回 `TaskManagerError::Conflict`；
 server 单测新增双向互斥用例（8/8 通过）。
+### 2026-08-13 runtest 完整 completion 与 WDA 测试资产构建
+
+使用本仓库 release `ios.exe`、隔离 home 与动态 IPC port；设备为文档同一台
+`测试 iPhone / iOS 26.5.2 / 23F84`。WDA 项目（`C:\Users/<user>\ClionProjects\WebDriverAgent`）
+经远程 macOS 构建主机（开发用 Mac 构建主机，Xcode 26.6）构建测试资产。
+
+**WDA 项目构建修复**（本机源码，已同步远程）：
+- `FBMainViewButtonLabels` 文件级数组字面量初始化改为 `__attribute__((constructor))` 惰性填充
+  （Xcode 26.6 clang 拒绝非编译期常量）
+- `SceneDelegate.m/.h` 从未加入 pbxproj（文件在磁盘但 IntegrationApp target 缺引用）→ xcodeproj 补引用
+- `FB_SAFARI_BUNDLE_ID` 只声明无定义 → FBSession.m 补定义
+- IntegrationTests_1/2/3、UnitTests、IntegrationApp 缺 **Copy frameworks phase**
+  （WebDriverAgentLib.framework 动态链接但未嵌入 → dyld 加载失败 "Failed to load the test bundle"）
+- 手动重签必须带 entitlements（xcent），否则安装报
+  "missing the application-identifier entitlement"
+- 产物经 .ipa 打包传输（zip 保留符号链接；scp 目录会丢 symlink）
+
+| 检查 | 实际结果 | 结论 |
+|---|---|---|
+| `debug <app_path>`（WDA Runner.app） | preflight（installation_proxy 匹配设备路径）、debug.lldb 执行（remote-ios/arm64/env-vars）、debug proxy task 建立与 client-owned 清理全部通过；`process connect` 报 `remote connections are not supported` —— Windows 官方 LLVM lldb 无 gdb-remote 插件 | passed（链路）/ blocked by lldb build |
+| `runtest` XCUITest（IntegrationTests_1） | 安装后自然结束：`completed: 3 passed, 56 failed, 0 skipped`；7058 条 NDJSON 事件含 case/test_plan/target 全生命周期；56 失败为 WDA 测试对 iOS 26 兼容问题 | **passed（完整 completion 闭环）** |
+| unit XCTest（UnitTests + IntegrationApp host） | host 启动正常、注入 dylib 存在可加载；go-ios 对照已到测试执行阶段（环境/资产就绪）；rust-ios fork 报 "test runner did not connect"（iOS 26 testmanagerd 会话握手） | partial；fork 需 DTX 层专项调试 |
+| test filters（--test-to-run/--test-to-skip） | 单元/archive 测试已覆盖；真机随 unit 握手修复后验证 | 待 fork 修复 |
+| cleanup | 测试 server/task/端口清理；保留 go-ios agent（用户环境）与设备已装测试 app | passed |
+
+未执行：erase/shutdown/set-wallpaper/supervised pair、RemotePairing（设备未广告 remoted）、
+Wintun（非管理员）。
