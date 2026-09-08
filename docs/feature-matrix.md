@@ -176,6 +176,29 @@
 | `mdm clear-screen-time-password` | offline-tested | MCInstall `ClearRestrictionsPassword`；无需 token，supervisor identity 即可 |
 | `pair` 锁定设备 | implemented | 设备锁定（passcode screen）时 supervised pair 无 Error 也无 EscrowBag 的场景返回 `DeviceLocked`（go-ios `ErrDeviceLockedPairingDeferred`），exit 2，不保存 pair record；Lockdown `DeviceLocked/PasswordProtected` 同样映射 |
 
+## 新增：go-ios ec90af1 同步（2026-09-08）
+
+基线推进到 `main-Attect-dev@ec90af1`（v1.2.1 后仅 1 个 fork 提交，上游 danielpaulus/go-ios 无新变更）。
+该提交把 TSS 客户端从完整 TLS 链验证改为"跳过链验证 + 叶子证书 sanity check"：gs.apple.com 链到
+Apple 私有 CA "Apple Server Authentication CA"（不在 Windows/精简 Linux 信任库），完整链验证会
+让冷 DDI 挂载报 unknown authority 失败。
+
+同步落点（vendor `idevice-0.1.65` 受控补丁，见 `RUST_IOS_PATCHES.md` 第 6 条）：
+
+- `src/tss.rs`：URL 由 `http://` 改为 `https://gs.apple.com/TSS/controller?action=2`（原实现为
+  明文 HTTP，不受该 bug 影响但传输不安全）；新增 rustls 自定义 `ServerCertVerifier`
+  `TssLeafSanityVerifier`——对齐 go-ios `verifyTssServerCert`：叶子必须解析成功、主机名匹配
+  `gs.apple.com`（webpki SAN 校验）、在有效期内（最小 DER 遍历取 notBefore/notAfter，含
+  UTCTime/GeneralizedTime 与 civil 日期换算），握手签名仍按 ring provider 算法验证。
+- `Cargo.toml`：`tss` feature 拉起 `rustls/ring`、`rustls-webpki`（叶子 SAN 校验）与
+  `reqwest/rustls-no-provider`，经 `tls_backend_preconfigured` 注入自定义 rustls `ClientConfig`。
+- 测试：DER 解析与日期换算单测 10 项；`#[ignore]` 真实端点握手测试
+  `tls_handshake_with_sanity_check_reaches_real_endpoint`（`-- --ignored` 手动运行，2026-09-08
+  在本机对 gs.apple.com 实测通过）。
+
+与 go-ios 的差异：go-ios 同提交还在 `tss_tls_test.go` 里保留了线上拨测；本项目对应为 ignored
+测试。真机冷 DDI 挂载（`image auto --basedir`）回归待做。
+
 ## 已知协议限制
 
 - userspace tunnel 默认使用 USB `CoreDeviceProxy`；`--remote-pairing` 使用独立 RemotePairing

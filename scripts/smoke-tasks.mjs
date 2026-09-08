@@ -332,21 +332,23 @@ try {
   xctestTask = await waitTask(xctestTask.id, 'completed');
   if (xctestTask.generation !== 2) throw new Error('XCTest generation did not advance');
   console.log('XCTEST task=' + xctestTask.id + ' generation=' + xctestTask.generation + ' bytes=' + xctestOutput.total_bytes);
-  try {
-    run([
-      'runtest',
-      '--test-runner-bundle-id=com.example.DemoUITests.xctrunner',
-      '--test-to-run=DemoUITests/testExample',
-      '--udid', 'mock-phone',
-    ]);
-    throw new Error('XCTest filter unexpectedly succeeded');
-  } catch (error) {
-    const protocol = JSON.parse(String(error.stderr).trim());
-    if (error.status !== 2 || protocol.error?.code !== 'not_implemented') {
-      throw new Error('bad XCTest filter rejection: ' + JSON.stringify({ status: error.status, protocol }));
-    }
+  // runtest unit filters are implemented (server capability `xctest_unit_filters`),
+  // so the mock backend must run the filtered test to completion instead of
+  // rejecting with not_implemented.
+  const filterRun = run([
+    'runtest',
+    '--test-runner-bundle-id=com.example.DemoUITests.xctrunner',
+    '--test-to-run=DemoUITests/testExample',
+    '--udid', 'mock-phone',
+  ]);
+  if (!filterRun?.value?.task?.id) {
+    throw new Error('runtest filter did not create a task: ' + JSON.stringify(filterRun));
   }
-  console.log('XCTEST_FILTER_REJECTION=not_implemented');
+  let filterTask = await waitTask(filterRun.value.task.id, 'completed');
+  if (filterTask.runtime.outcome !== 'passed') {
+    throw new Error('bad runtest filter result: ' + JSON.stringify(filterTask));
+  }
+  console.log('XCTEST_FILTER task=' + filterTask.id + ' outcome=' + filterTask.runtime.outcome);
 
   let appProcessTask = run([
     'launch', 'com.example.Demo', '--wait', '--kill-existing',
@@ -499,7 +501,8 @@ try {
   ]);
 
   const restored = run(['task', 'list']).value.tasks;
-  if (restored.length !== 15) throw new Error('expected 15 restored tasks, got ' + restored.length);
+  // 15 pre-existing task kinds plus the runtest filter task added above.
+  if (restored.length !== 16) throw new Error('expected 16 restored tasks, got ' + restored.length);
   await waitTask(forwardTask.id);
   await waitTask(syslogTask.id);
   const restoredOstraceTask = await waitTask(ostraceTask.id);

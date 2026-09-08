@@ -232,6 +232,9 @@ tcp = ["tokio/net"]
 tss = [
     "dep:uuid",
     "_reqwest",
+    "rustls/ring",
+    "dep:rustls-webpki",
+    "reqwest/rustls-no-provider",
 ]
 tunnel_tcp_stack = ["dep:jktcp"]
 tunnel_tcp_stack_pcap = [
@@ -399,6 +402,12 @@ features = [
     "std",
     "tls12",
 ]
+optional = true
+default-features = false
+
+[dependencies.rustls-webpki]
+version = "0.103"
+features = ["std"]
 optional = true
 default-features = false
 

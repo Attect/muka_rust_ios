@@ -1,32 +1,22 @@
-# 真机验证清单
 
-## 记录规则
+### 2026-09-08 go-ios ec90af1 同步（TSS HTTPS + 叶子 sanity check，真机回归待做）
 
-每次真机验证必须记录日期、OS、连接方式、设备/iOS 大版本、命令、预期、实际结果和是否会改变
-设备状态。公开文档只保留脱敏 UDID；完整 PairRecord、serial、IMEI、Wi-Fi/Bluetooth address 等不得
-进入仓库。
+同步 go-ios `main-Attect-dev@ec90af1`：TSS 请求由明文 `http://gs.apple.com` 改为
+`https://` + rustls 自定义 verifier（跳过链验证，叶子证书校验主机名 `gs.apple.com` 与
+有效期；对齐 go-ios `verifyTssServerCert`）。实现落在 vendor `idevice-0.1.65/src/tss.rs`
+受控补丁（`tss` feature 拉起 `rustls/ring`、`rustls-webpki`、`reqwest/rustls-no-provider`）。
 
-状态：`not-run`、`passed`、`failed`、`blocked`。编译成功和 mock 通过不能写成真机 passed。
+本轮为离线与网络层验证，未接设备：
 
-## 当前只读记录
+| 检查 | 实际结果 | 结论 |
+|---|---|---|
+| vendored 定向单测（`--features tss,ring tss::`） | 10 passed / 0 failed（DER 遍历、UTCTime/GeneralizedTime 解析、civil 日期换算、oversized length 拒绝、RestoreRequestRules 既有 6 项） | passed |
+| 真实端点握手（`tss::tests::tls_handshake_with_sanity_check_reaches_real_endpoint --ignored`） | 对 `https://gs.apple.com/TSS/controller?action=2` 实测握手通过叶子 sanity check（私有 CA 场景，Windows 信任库无该根证书）；首次实现外层 SEQUENCE 少剥一层导致 `BadEncoding`，修正后通过 | passed |
+| 冷 DDI 挂载 `image auto --basedir D:\iOSDeviceSupport\iOSDeviceSupport` | 未执行（本轮未接设备）；该路径是唯一真实走通 TSS HTTPS 新链路的验证 | **待真机回归** |
 
-| 日期 | Host | 连接 | 检查 | 结果 |
-|---|---|---|---|---|
-| 2026-07-16 | Windows x64 | USB / `127.0.0.1:27015` | `list` | passed，exit 0，检测到 1 台设备 |
-| 2026-07-16 | Windows x64 | USB / Lockdown | `info` | passed，只读完整值查询 |
-
-UDID 仅记录为 `<udid>`。本次没有执行 pair、写文件、安装、定位、Developer Mode、
-image、reboot/shutdown、tunnel 或 capture service。
-
-## iOS 26 Activation fast path 记录
-
-使用 release `ios.exe`、独立 `%TEMP%` server home 和动态 loopback IPC port；先通过 `info` 读取
-`ActivationState`，只有状态明确不是 `Unactivated` 时才执行 `activate`。
-
-| 日期 | 命令/检查 | 预期 | 实际 | 结果 |
-|---|---|---|---|---|
-| 2026-07-16 | `info` | 先确认不会进入激活写路径 | 测试 iPhone / iOS 26.5.2，`ActivationState=Activated` | passed |
-| 2026-07-16 | `activate --udid <udid>` | 已激活设备只读幂等返回，不访问 Apple HTTP、不回写 mobileactivationd | `status=already_activated`、`activationState=Activated`、`verified=true` | passed |
+注意：TSS 请求现走 HTTPS；如挂载出现证书类错误，先用上述 ignored 测试定位是
+verifier 拒绝（叶子主机名/有效期）还是网络层问题。
+verified=true` | passed |
 | 2026-07-16 | cleanup | 无 server/process/temp home | 独立 home 删除，`ios/go-ios` 进程 0 | passed |
 
 本次不证明 Unactivated -> Activated 的网络与设备回写路径；该路径仍需专用未激活设备。

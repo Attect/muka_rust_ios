@@ -14,7 +14,279 @@ use crate::IdeviceError;
 /// TSS client version string sent in requests
 const TSS_CLIENT_VERSION_STRING: &str = "libauthinstall-1033.0.2";
 /// Apple's TSS endpoint URL
-const TSS_CONTROLLER_ACTION_URL: &str = "http://gs.apple.com/TSS/controller?action=2";
+///
+/// HTTPS, mirroring go-ios `ec90af1`: the TSS exchange carries the device
+/// personalization parameters (ECID, nonces) and returns signed tickets, so it
+/// must not travel over plaintext. Certificate validation is delegated to the
+/// leaf sanity check in [`tls_sanity`] instead of full chain verification.
+const TSS_CONTROLLER_ACTION_URL: &str = "https://gs.apple.com/TSS/controller?action=2";
+
+/// Builds the HTTP client used for TSS requests.
+///
+/// The client uses the rustls backend with a custom verifier that skips chain
+/// validation (gs.apple.com chains to Apple's private "Apple Server
+/// Authentication CA", which is absent from the trust store on Windows and
+/// minimal Linux hosts) but sanity-checks the leaf certificate, mirroring
+/// go-ios `verifyTssServerCert`.
+fn tss_http_client() -> Result<reqwest::Client, IdeviceError> {
+    let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
+    let config = rustls::ClientConfig::builder_with_provider(provider.clone())
+        .with_safe_default_protocol_versions()
+        .map_err(|e| {
+            IdeviceError::UnexpectedResponse(format!("rustls protocol config failed: {e}"))
+        })?
+        .dangerous()
+        .with_custom_certificate_verifier(std::sync::Arc::new(
+            tls_sanity::TssLeafSanityVerifier::new(&provider),
+        ))
+        .with_no_client_auth();
+    reqwest::Client::builder()
+        .tls_backend_preconfigured(config)
+        .build()
+        .map_err(Into::into)
+}
+
+/// Leaf-certificate sanity checks for the TSS TLS connection.
+///
+/// gs.apple.com chains to Apple's private root CA, so full chain verification
+/// breaks cold DDI mounts on hosts without that root (upstream go-ios #348
+/// skipped verification for exactly this reason, and `ec90af1` restored
+/// usability with this same tradeoff). Instead of trusting everything, the
+/// leaf must parse, name gs.apple.com, and be inside its validity window;
+/// handshake signatures are still verified with the provider's algorithms.
+mod tls_sanity {
+    use rustls::client::danger::{
+        HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier,
+    };
+    use rustls::crypto::{
+        verify_tls12_signature, verify_tls13_signature, CryptoProvider,
+        WebPkiSupportedAlgorithms,
+    };
+    use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+    use rustls::{CertificateError, DigitallySignedStruct, Error, SignatureScheme};
+    use tracing::debug;
+    use webpki::EndEntityCert;
+
+    /// The only hostname a TSS server certificate may vouch for.
+    const TSS_HOST: &str = "gs.apple.com";
+
+    /// Verifier that replaces chain validation with leaf sanity checks.
+    #[derive(Debug)]
+    pub(super) struct TssLeafSanityVerifier {
+        algs: WebPkiSupportedAlgorithms,
+    }
+
+    impl TssLeafSanityVerifier {
+        pub(super) fn new(provider: &CryptoProvider) -> Self {
+            Self {
+                algs: provider.signature_verification_algorithms,
+            }
+        }
+
+        fn reject(err: CertificateError) -> Error {
+            Error::InvalidCertificate(err)
+        }
+    }
+
+    impl ServerCertVerifier for TssLeafSanityVerifier {
+        fn verify_server_cert(
+            &self,
+            end_entity: &CertificateDer<'_>,
+            _intermediates: &[CertificateDer<'_>],
+            server_name: &ServerName<'_>,
+            _ocsp_response: &[u8],
+            now: UnixTime,
+        ) -> Result<ServerCertVerified, Error> {
+            let expected = ServerName::try_from(TSS_HOST)
+                .map_err(|_| Self::reject(CertificateError::NotValidForName))?;
+            // The connected name must be the pinned TSS host, and the leaf
+            // must actually vouch for it via its SANs.
+            let matches_pinned = matches!(
+                server_name,
+                ServerName::DnsName(name) if name.as_ref() == TSS_HOST
+            );
+            if !matches_pinned {
+                return Err(Self::reject(CertificateError::NotValidForName));
+            }
+            let leaf = EndEntityCert::try_from(end_entity)
+                .map_err(|_| Self::reject(CertificateError::BadEncoding))?;
+            leaf.verify_is_valid_for_subject_name(&expected)
+                .map_err(|_| Self::reject(CertificateError::NotValidForName))?;
+            let (not_before, not_after) = leaf_validity_window(end_entity.as_ref())
+                .ok_or_else(|| Self::reject(CertificateError::BadEncoding))?;
+            let now_secs = now.as_secs() as i64;
+            if now_secs < not_before {
+                return Err(Self::reject(CertificateError::NotValidYet));
+            }
+            if now_secs > not_after {
+                return Err(Self::reject(CertificateError::Expired));
+            }
+            debug!(
+                host = TSS_HOST,
+                not_after = not_after,
+                "tss server certificate accepted"
+            );
+            Ok(ServerCertVerified::assertion())
+        }
+
+        fn verify_tls12_signature(
+            &self,
+            message: &[u8],
+            cert: &CertificateDer<'_>,
+            dss: &DigitallySignedStruct,
+        ) -> Result<HandshakeSignatureValid, Error> {
+            verify_tls12_signature(message, cert, dss, &self.algs)
+        }
+
+        fn verify_tls13_signature(
+            &self,
+            message: &[u8],
+            cert: &CertificateDer<'_>,
+            dss: &DigitallySignedStruct,
+        ) -> Result<HandshakeSignatureValid, Error> {
+            verify_tls13_signature(message, cert, dss, &self.algs)
+        }
+
+        fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+            self.algs.supported_schemes()
+        }
+    }
+
+    /// Returns the leaf's `(not_before, not_after)` as Unix seconds.
+    ///
+    /// Walks the top-level DER structure only:
+    /// `Certificate → tbsCertificate ([0] version, serial, signature alg,
+    /// issuer) → validity → notBefore/notAfter` (UTCTime or GeneralizedTime).
+    pub(super) fn leaf_validity_window(cert_der: &[u8]) -> Option<(i64, i64)> {
+        let mut top = cert_der;
+        // Certificate ::= SEQUENCE { tbsCertificate, signatureAlgorithm,
+        // signatureValue } — peel the outer SEQUENCE, then take the first
+        // field as tbsCertificate.
+        let certificate = expect_tlv(&mut top, 0x30)?;
+        let mut fields = certificate;
+        let tbs = expect_tlv(&mut fields, 0x30)?;
+        let mut tbs = tbs;
+        // `[0] EXPLICIT version` is optional and only present for v3 certs.
+        let mut probe = tbs;
+        if matches!(read_tlv(&mut probe), Some((0xA0, _))) {
+            read_tlv(&mut tbs)?;
+        }
+        read_tlv(&mut tbs)?; // serialNumber
+        read_tlv(&mut tbs)?; // signature AlgorithmIdentifier
+        read_tlv(&mut tbs)?; // issuer
+        let validity = expect_tlv(&mut tbs, 0x30)?;
+        let mut validity = validity;
+        let (tag_before, before) = read_tlv(&mut validity)?;
+        let (tag_after, after) = read_tlv(&mut validity)?;
+        Some((
+            der_time_to_unix(tag_before, before)?,
+            der_time_to_unix(tag_after, after)?,
+        ))
+    }
+
+    fn expect_tlv<'a>(input: &mut &'a [u8], tag: u8) -> Option<&'a [u8]> {
+        let (actual, value) = read_tlv(input)?;
+        if actual != tag {
+            return None;
+        }
+        Some(value)
+    }
+
+    /// Reads one DER tag-length-value, returning `(tag, content)`.
+    pub(super) fn read_tlv<'a>(input: &mut &'a [u8]) -> Option<(u8, &'a [u8])> {
+        if input.len() < 2 {
+            return None;
+        }
+        let tag = input[0];
+        let mut idx = 1;
+        let first_len = input[idx];
+        idx += 1;
+        let len = if first_len & 0x80 == 0 {
+            first_len as usize
+        } else {
+            let num_bytes = (first_len & 0x7f) as usize;
+            if num_bytes == 0 || num_bytes > 4 || input.len() < idx + num_bytes {
+                return None;
+            }
+            let mut len = 0usize;
+            for byte in &input[idx..idx + num_bytes] {
+                len = (len << 8) | *byte as usize;
+            }
+            idx += num_bytes;
+            len
+        };
+        if input.len() < idx + len {
+            return None;
+        }
+        let content = &input[idx..idx + len];
+        *input = &input[idx + len..];
+        Some((tag, content))
+    }
+
+    /// Parses X.509 `Time` (UTCTime `YYMMDDHHMMSSZ` / GeneralizedTime
+    /// `YYYYMMDDHHMMSSZ`) into Unix seconds.
+    pub(super) fn der_time_to_unix(tag: u8, value: &[u8]) -> Option<i64> {
+        let (year, rest) = match tag {
+            0x17 => {
+                // UTCTime: RFC 5280 maps YY >= 50 to 19YY, else 20YY.
+                if value.len() < 12 {
+                    return None;
+                }
+                let yy = ascii_digits(&value[..2])?;
+                let year = if yy >= 50 { 1900 + yy } else { 2000 + yy };
+                (year as i64, &value[2..])
+            }
+            0x18 => {
+                if value.len() < 14 {
+                    return None;
+                }
+                (ascii_digits(&value[..4])? as i64, &value[4..])
+            }
+            _ => return None,
+        };
+        if rest.len() < 10 {
+            return None;
+        }
+        let month = ascii_digits(&rest[0..2])?;
+        let day = ascii_digits(&rest[2..4])?;
+        let hour = ascii_digits(&rest[4..6])?;
+        let minute = ascii_digits(&rest[6..8])?;
+        let second = ascii_digits(&rest[8..10])?;
+        if !(1..=12).contains(&month)
+            || !(1..=31).contains(&day)
+            || hour > 23
+            || minute > 59
+            || second > 60
+        {
+            return None;
+        }
+        let days = days_from_civil(year, month, day);
+        Some(days * 86_400 + hour as i64 * 3_600 + minute as i64 * 60 + second as i64)
+    }
+
+    fn ascii_digits(bytes: &[u8]) -> Option<u32> {
+        let mut value = 0u32;
+        for byte in bytes {
+            if !byte.is_ascii_digit() {
+                return None;
+            }
+            value = value * 10 + u32::from(byte - b'0');
+        }
+        Some(value)
+    }
+
+    /// Days since the Unix epoch for a civil date (Howard Hinnant's
+    /// `days_from_civil`, valid for the whole i64 year range used here).
+    pub(super) fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
+        let y = if month <= 2 { year - 1 } else { year };
+        let era = if y >= 0 { y } else { y - 399 } / 400;
+        let yoe = y - era * 400;
+        let mp = (month as i64 + 9) % 12;
+        let doy = (153 * mp + 2) / 5 + day as i64 - 1;
+        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+        era * 146_097 + doe - 719_468
+    }
+}
 
 /// Represents a TSS request to Apple's signing server
 #[derive(Debug)]
@@ -73,7 +345,7 @@ impl TSSRequest {
             "Sending TSS request: {}",
             crate::pretty_print_dictionary(&self.inner)
         );
-        let client = reqwest::Client::new();
+        let client = tss_http_client()?;
 
         let res = client
             .post(TSS_CONTROLLER_ACTION_URL)
@@ -703,5 +975,105 @@ mod tests {
         assert_eq!(parse_hex_field(Some(&plist::Value::Boolean(true))), None);
         assert_eq!(parse_hex_field(Some(&plist::Value::String("zz".into()))), None);
         assert_eq!(parse_hex_field(None), None);
+    }
+
+    #[test]
+    fn days_from_civil_known_dates() {
+        use super::tls_sanity::days_from_civil;
+        assert_eq!(days_from_civil(1970, 1, 1), 0);
+        assert_eq!(days_from_civil(2000, 3, 1), 11_017);
+        assert_eq!(days_from_civil(2026, 1, 1), 20_454);
+        assert_eq!(days_from_civil(2050, 1, 1), 29_220);
+    }
+
+    #[test]
+    fn der_time_to_unix_parses_both_time_forms() {
+        use super::tls_sanity::der_time_to_unix;
+        // UTCTime 26-01-08 15:30:00 Z
+        assert_eq!(
+            der_time_to_unix(0x17, b"260108153000Z"),
+            Some(1_767_886_200)
+        );
+        // GeneralizedTime 2050-01-01 00:00:00 Z
+        assert_eq!(
+            der_time_to_unix(0x18, b"20500101000000Z"),
+            Some(2_524_608_000)
+        );
+        // UTCTime YY >= 50 maps to 19YY: 99-12-31 23:59:60 (leap second allowed)
+        assert_eq!(der_time_to_unix(0x17, b"991231235960Z"), Some(946_684_800));
+        assert_eq!(der_time_to_unix(0x17, b"short"), None);
+        assert_eq!(der_time_to_unix(0x18, b"2050010100000Z"), None);
+        assert_eq!(der_time_to_unix(0x16, b"260108153000Z"), None);
+        assert_eq!(der_time_to_unix(0x17, b"991332235900Z"), None);
+    }
+
+    #[test]
+    fn leaf_validity_window_parses_minimal_certificate() {
+        use super::tls_sanity::leaf_validity_window;
+
+        fn tlv(tag: u8, content: &[u8]) -> Vec<u8> {
+            let mut out = vec![tag];
+            // Contents here stay far below 128 bytes, so only short form
+            // lengths are needed.
+            out.push(content.len() as u8);
+            out.extend_from_slice(content);
+            out
+        }
+
+        // A minimal TBS: [0] version, serial, signature alg, issuer, validity.
+        let mut tbs = tlv(0xA0, &tlv(0x03, &[0x00]));
+        tbs.extend(tlv(0x02, &[0x01]));
+        tbs.extend(tlv(0x30, &[0x00]));
+        tbs.extend(tlv(0x30, &[0x00]));
+        let validity = tlv(0x30, &[tlv(0x17, b"260108153000Z"), tlv(0x18, b"20500101000000Z")].concat());
+        tbs.extend(&validity);
+        // Certificate ::= SEQUENCE { tbsCertificate SEQUENCE { ... } } (the
+        // trailing signatureAlgorithm/signatureValue fields are not needed).
+        let cert = tlv(0x30, &tlv(0x30, &tbs));
+
+        assert_eq!(
+            leaf_validity_window(&cert),
+            Some((1_767_886_200, 2_524_608_000))
+        );
+
+        // Truncated input must fail cleanly instead of panicking.
+        assert_eq!(leaf_validity_window(&cert[..cert.len() - 4]), None);
+        assert_eq!(leaf_validity_window(&[]), None);
+    }
+
+    #[test]
+    fn read_tlv_rejects_oversized_lengths() {
+        use tls_sanity::read_tlv;
+        // Length prefix claims 4 following length bytes but none exist.
+        assert_eq!(read_tlv(&mut &[0x30, 0x84][..]), None);
+        // 0x80 = indefinite length, invalid in DER.
+        assert_eq!(read_tlv(&mut &[0x30, 0x80, 0x00][..]), None);
+        // Well-formed short-form TLV round-trips.
+        assert_eq!(
+            read_tlv(&mut &[0x30, 0x02, 0xAA, 0xBB, 0xFF][..]),
+            Some((0x30, &[0xAA, 0xBB][..]))
+        );
+    }
+
+    /// Dials the real TSS endpoint with the production TLS config to prove
+    /// the leaf sanity check accepts gs.apple.com's private-CA certificate.
+    /// Requires network access; run explicitly with `cargo test -- --ignored`.
+    #[tokio::test]
+    #[ignore = "requires network access to gs.apple.com"]
+    async fn tls_handshake_with_sanity_check_reaches_real_endpoint() {
+        let client = tss_http_client().expect("tss http client builds");
+        let body = plist_to_xml_bytes(&plist::Dictionary::new());
+        // Any HTTP status proves the handshake passed the sanity check; the
+        // empty request may legitimately be rejected by Apple afterwards.
+        let response = client
+            .post(TSS_CONTROLLER_ACTION_URL)
+            .header("Cache-Control", "no-cache")
+            .header("Content-type", "text/xml; charset=\"utf-8\"")
+            .header("User-Agent", "InetURL/1.0")
+            .body(body)
+            .send()
+            .await
+            .expect("TLS handshake with gs.apple.com must pass the sanity check");
+        debug!("real endpoint answered with HTTP {}", response.status());
     }
 }

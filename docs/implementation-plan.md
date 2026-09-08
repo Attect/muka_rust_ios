@@ -16,11 +16,11 @@
 生命周期测试可重复。真机协议功能只有在真机验证后才标记为 `verified`，不能把“能编译”写成
 “已验证”。
 
-## 当前进度（2026-08-07）
+## 当前进度（2026-09-08）
 
 | 阶段 | 状态 | 当前证据/剩余工作 |
 |---|---|---|
-| P0 参考审计 | complete | 基线推进到 go-ios `main-Attect-dev@7c9a4dd`（v1.2.1，+50 提交）：新增 pasteboard/mdm/pair-exit2 已同步；TSS、mount、RSD、XCTest、zip-slip 等经对照确认已具备；usbmuxd/AFC/XPC/NSKeyedArchiver 加固已补齐（其中 XPC body_len 检查因协议结构差异不适用，见 feature-matrix） |
+| P0 参考审计 | complete | 基线推进到 go-ios `main-Attect-dev@ec90af1`（v1.2.1 后 +1 提交，2026-09-08）：TSS 改 HTTPS + 叶子证书 sanity check 已同步到 vendor `tss.rs`（离线单测与真实端点握手通过，冷 DDI 挂载真机回归待做）；此前的 pasteboard/mdm/pair-exit2、mount、RSD、XCTest、zip-slip 与 usbmuxd/AFC/XPC/NSKeyedArchiver 加固已同步（XPC body_len 检查因协议结构差异不适用，见 feature-matrix） |
 | P1 workspace/IPC | complete | protocol 1.20、codec/auth/request ID、typed OsTrace options、交互 task input、client-owned lease、WDA event、XCTest unit/filter/shared RSD、Windows kernel tunnel 与 dproxy capability 测试 |
 | P2 server 生命周期 | complete on Windows | detached spawn、lock、强杀恢复进程测试 |
 | P3 backend/usbmuxd | complete for Windows | mock/replay/recording 完成；Windows list/info 只读通过；2026-08-07 pnputil 恢复枚举后 iOS 26 回归通过 |
