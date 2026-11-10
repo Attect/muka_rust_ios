@@ -76,6 +76,11 @@ pub trait ReadWrite: AsyncRead + AsyncWrite + Unpin + Send + Sync + std::fmt::De
 // Blanket implementation for any compatible type
 impl<T: AsyncRead + AsyncWrite + Unpin + Send + Sync + std::fmt::Debug> ReadWrite for T {}
 
+/// lockdown plist 回复长度上限（128 MiB）。4 字节长度前缀直接驱动 `vec![0; len]`
+/// 分配，损坏/恶意帧的不可信长度最高可声明 4 GiB；该上限远超正常回复
+/// （rust-ios 受控补丁，同步 go-ios hardening 精神）。
+const MAX_PLIST_MESSAGE_SIZE: usize = 128 * 1024 * 1024;
+
 /// Interface for services that can be connected to on an iOS device
 ///
 /// Implement this trait to define new services that can be accessed through the
@@ -596,8 +601,16 @@ impl Idevice {
             debug!("Reading response size");
             let mut buf = [0u8; 4];
             socket.read_exact(&mut buf).await?;
-            let len = u32::from_be_bytes(buf);
-            let mut buf = vec![0; len as usize];
+            // 4 字节长度前缀是不可信 wire 值（最高 4 GiB），直接驱动分配会被损坏/
+            // 恶意帧放大成一次性巨量内存。128 MiB 上限远超正常 lockdown 回复
+            // （rust-ios 受控补丁，同步 go-ios hardening 精神）。
+            let len = u32::from_be_bytes(buf) as usize;
+            if len > MAX_PLIST_MESSAGE_SIZE {
+                return Err(IdeviceError::UnexpectedResponse(format!(
+                    "lockdown plist length {len} exceeds the {MAX_PLIST_MESSAGE_SIZE} byte limit"
+                )));
+            }
+            let mut buf = vec![0; len];
             socket.read_exact(&mut buf).await?;
             let res: plist::Value = plist::from_bytes(&buf)?;
             Ok(res)

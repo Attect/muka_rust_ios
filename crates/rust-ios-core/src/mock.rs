@@ -3279,6 +3279,7 @@ mod tests {
                     pid: None,
                     process: None,
                     os_trace: None,
+                    watch_kill_targets: None,
                 },
                 None,
             )
@@ -3298,6 +3299,7 @@ mod tests {
                     pid: Some(42),
                     process: None,
                     os_trace: None,
+                    watch_kill_targets: None,
                 },
                 None,
             )
@@ -3322,6 +3324,7 @@ mod tests {
                         message_excludes: Some("ignored".into()),
                         follow: true,
                     }),
+                    watch_kill_targets: None,
                 },
                 None,
             )
@@ -3348,6 +3351,7 @@ mod tests {
                         pid: None,
                         process: None,
                         os_trace: None,
+                        watch_kill_targets: None,
                     },
                     None,
                 )
@@ -3367,6 +3371,7 @@ mod tests {
                     pid: Some(42),
                     process: Some("App".into()),
                     os_trace: None,
+                    watch_kill_targets: None,
                 },
                 None,
             )

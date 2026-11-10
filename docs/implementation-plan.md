@@ -16,12 +16,12 @@
 生命周期测试可重复。真机协议功能只有在真机验证后才标记为 `verified`，不能把“能编译”写成
 “已验证”。
 
-## 当前进度（2026-09-08）
+## 当前进度（2026-11-10）
 
 | 阶段 | 状态 | 当前证据/剩余工作 |
 |---|---|---|
-| P0 参考审计 | complete | 基线推进到 go-ios `main-Attect-dev@ec90af1`（v1.2.1 后 +1 提交，2026-09-08）：TSS 改 HTTPS + 叶子证书 sanity check 已同步到 vendor `tss.rs`（离线单测与真实端点握手通过，冷 DDI 挂载真机回归待做）；此前的 pasteboard/mdm/pair-exit2、mount、RSD、XCTest、zip-slip 与 usbmuxd/AFC/XPC/NSKeyedArchiver 加固已同步（XPC body_len 检查因协议结构差异不适用，见 feature-matrix） |
-| P1 workspace/IPC | complete | protocol 1.20、codec/auth/request ID、typed OsTrace options、交互 task input、client-owned lease、WDA event、XCTest unit/filter/shared RSD、Windows kernel tunnel 与 dproxy capability 测试 |
+| P0 参考审计 | complete | 基线推进到 go-ios `main-Attect-dev@65bbc9f`（合并上游至 `6910f3b`，约 76 个上游提交 + fork 3172596/505b391，2026-11-10 按批次 A–D 同步）：already-mounted 幂等、隧道拨号 15s 超时、探针迟滞、syslog vis、vendor 加固包、RSD host announce 重构（回显 flags/每隧道一次/重试安全）、cryptexd 挂载体系 + 引用式文件流 + ensure-mounted 幂等、JUnit 输出、sysmontap v1 帧、多显示器截图、HID、kill --watch（详见 feature-matrix「65bbc9f 同步」节与 vendor `RUST_IOS_PATCHES.md` 第 7–11 条）；iOS 27/新设备真机回归与 display 媒体流 server 任务待做 |
+| P1 workspace/IPC | complete | protocol 1.20、codec/auth/request ID、typed OsTrace options、交互 task input、client-owned lease、WDA event、XCTest unit/filter/shared RSD/junit-output、Windows kernel tunnel 与 dproxy capability 测试 |
 | P2 server 生命周期 | complete on Windows | detached spawn、lock、强杀恢复进程测试 |
 | P3 backend/usbmuxd | complete for Windows | mock/replay/recording 完成；Windows list/info 只读通过；2026-08-07 pnputil 恢复枚举后 iOS 26 回归通过 |
 | P4 task manager | complete for current task kinds | list/show/stop/restart/output、原子 state、退避/恢复；dproxy active connection 取消与超时 supervisor abort 已测 |

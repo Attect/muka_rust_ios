@@ -10,6 +10,8 @@ mod activation;
 mod app_store_connect;
 mod backend;
 #[cfg(feature = "real-device")]
+mod cryptex;
+#[cfg(feature = "real-device")]
 mod ddi;
 mod debug;
 mod dproxy;

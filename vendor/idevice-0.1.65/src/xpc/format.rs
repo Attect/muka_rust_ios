@@ -12,6 +12,14 @@ use tracing::{debug, warn};
 use super::errors::XpcError;
 use crate::{CdTunnelError, IdeviceError};
 
+/// 固定 XPC 消息包装头长度：magic + flags + body 长度 + message id。
+pub(crate) const XPC_MESSAGE_WRAPPER_LEN: usize = 24;
+
+/// 单条 XPC 消息 body 的防御性上限（128 MiB，与 ios-core dtx 的 128 MiB 消息上限
+/// 同级）。正常回复（含大截图/文件数据）远低于此值；不可信的 wire body_len 超限
+/// 时直接拒绝，不再驱动缓冲累积（rust-ios 受控补丁，同步 go-ios hardening 精神）。
+pub(crate) const MAX_XPC_MESSAGE_SIZE: u64 = 128 * 1024 * 1024;
+
 #[derive(Clone, Copy, Debug)]
 #[repr(u32)]
 pub enum XPCFlag {
@@ -518,8 +526,13 @@ impl XPCMessage {
         // 注意：rust-ios 的 XPC body 直接承载 XPCObject 编码（空字典等控制帧
         // 可小于 8 字节），不像 go-ios 那样包含 8 字节 body header；因此不能
         // 套用 go-ios 的 BodyLen >= 8 检查。长度一致性由下面的越界检查和
-        // XPCObject::decode 内部边界保证。
-        if body_len + 24 > data.len() as u64 {
+        // XPCObject::decode 内部边界保证。body_len 为不可信的 wire 值：先做
+        // 上限与溢出防护（同步 go-ios hardening 精神），再驱动切片与缓冲累积。
+        if body_len > MAX_XPC_MESSAGE_SIZE
+            || body_len
+                .checked_add(XPC_MESSAGE_WRAPPER_LEN as u64)
+                .is_none_or(|total| total > data.len() as u64)
+        {
             warn!(
                 "Body length is {body_len}, but received bytes is {}",
                 data.len()

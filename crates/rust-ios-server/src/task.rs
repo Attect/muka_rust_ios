@@ -3634,6 +3634,7 @@ async fn supervise_screenshot_stream(
             pid: None,
             process: None,
             os_trace: None,
+            watch_kill_targets: None,
         };
         let stream = match tunnel {
             Ok(tunnel) => backend.start_stream(&stream_spec, tunnel).await,
@@ -5408,6 +5409,14 @@ async fn supervise_xctest(
         .as_deref()
         .expect("normalized XCTest output path")
         .to_owned();
+    // --junit-output（同步 go-ios `aeda162`）：收集事件流，运行结束（含失败/
+    // 取消）时把聚合结果写成 JUnit XML，供 CI 消费；未配置时不占用内存。
+    let junit_output_path = spec.junit_output_path.clone();
+    let mut junit_events = if junit_output_path.is_some() {
+        Some(Vec::new())
+    } else {
+        None
+    };
     increment_attempt(&record).await;
     set_state(
         &record,
@@ -5506,6 +5515,9 @@ async fn supervise_xctest(
         };
         match update {
             Ok(XCTestSessionUpdate::Event(event)) => {
+                if let Some(events) = junit_events.as_mut() {
+                    events.push(event.clone());
+                }
                 let mut bytes = match serde_json::to_vec(&event) {
                     Ok(bytes) => bytes,
                     Err(error) => {
@@ -5544,6 +5556,8 @@ async fn supervise_xctest(
                 } else {
                     "passed"
                 };
+                let mut runtime = xctest_runtime(&info, &output_path, Some((&summary, outcome)));
+                write_xctest_junit(&junit_output_path, junit_events.as_deref(), &mut runtime).await;
                 finish_xctest(
                     &record,
                     RuntimeState::Completed,
@@ -5551,20 +5565,16 @@ async fn supervise_xctest(
                         "XCTest completed: {} passed, {} failed, {} skipped",
                         summary.passed, summary.failed, summary.skipped
                     ),
-                    xctest_runtime(&info, &output_path, Some((&summary, outcome))),
+                    runtime,
                 )
                 .await;
                 return;
             }
             Err(error) => {
                 let _ = session.close().await;
-                finish_xctest(
-                    &record,
-                    RuntimeState::Failed,
-                    error.to_string(),
-                    xctest_runtime(&info, &output_path, None),
-                )
-                .await;
+                let mut runtime = xctest_runtime(&info, &output_path, None);
+                write_xctest_junit(&junit_output_path, junit_events.as_deref(), &mut runtime).await;
+                finish_xctest(&record, RuntimeState::Failed, error.to_string(), runtime).await;
                 return;
             }
         }
@@ -5588,6 +5598,27 @@ fn xctest_runtime(
         runtime["summary"] = serde_json::to_value(summary).unwrap_or(Value::Null);
     }
     runtime
+}
+
+/// 把聚合的 JUnit XML 写到 `--junit-output` 路径（server 代写 client 绝对路径，
+/// 与 screenshot 的约定一致）；写盘失败记录进 runtime，不吞掉运行结果。
+async fn write_xctest_junit(
+    junit_output_path: &Option<String>,
+    events: Option<&[rust_ios_protocol::XCTestEvent]>,
+    runtime: &mut Value,
+) {
+    let (Some(path), Some(events)) = (junit_output_path.as_deref(), events) else {
+        return;
+    };
+    let xml = rust_ios_protocol::junit::junit_xml(events);
+    match tokio::fs::write(path, xml.as_bytes()).await {
+        Ok(()) => {
+            runtime["junitOutputPath"] = Value::String(path.to_owned());
+        }
+        Err(error) => {
+            runtime["junitOutputError"] = Value::String(error.to_string());
+        }
+    }
 }
 
 async fn finish_xctest(
@@ -6562,6 +6593,29 @@ async fn run_debug_proxy_endpoint(
     }
 }
 
+/// 数据面探针连续失败多少次才中断隧道并触发重建。同步 go-ios fork `3172596` 的
+/// 防抖语义(该提交针对 go-ios agent 的 `UpdateTunnels`;rust 隧道与设备枚举解耦,
+/// 但探针原实现同样"单次失败即 abort 全部连接并重建",重建瞬间上层连接全断,
+/// WDA/XCTest 会话同样受影响)。真正的数据面死亡仍在约 2 秒 × 阈值内被识别。
+const PROBE_FAILURES_BEFORE_REBUILD: u32 = 3;
+
+/// 单次数据面探针失败的处理决策(防抖)。
+#[derive(Debug, PartialEq, Eq)]
+enum ProbeFailureVerdict {
+    /// 未达阈值:告警并保留隧道与现有连接,计数等待下一次探针。
+    KeepTunnel,
+    /// 达到阈值:中断探针循环,交给 supervisor 退避重建。
+    Rebuild,
+}
+
+fn probe_failure_verdict(failures: u32) -> ProbeFailureVerdict {
+    if failures < PROBE_FAILURES_BEFORE_REBUILD {
+        ProbeFailureVerdict::KeepTunnel
+    } else {
+        ProbeFailureVerdict::Rebuild
+    }
+}
+
 async fn run_tunnel_endpoint(
     listener: TcpListener,
     tunnel: Arc<dyn UserSpaceTunnel>,
@@ -6571,6 +6625,7 @@ async fn run_tunnel_endpoint(
     let mut health = tokio::time::interval(Duration::from_secs(2));
     health.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     health.tick().await;
+    let mut probe_failures: u32 = 0;
     loop {
         tokio::select! {
             () = cancel.cancelled() => {
@@ -6580,21 +6635,38 @@ async fn run_tunnel_endpoint(
             }
             _ = health.tick() => {
                 let rsd_port = tunnel.info().rsd_port;
-                match tokio::time::timeout(Duration::from_secs(5), tunnel.connect(rsd_port)).await {
-                    Ok(Ok(stream)) => drop(stream),
-                    Ok(Err(error)) => {
-                        connections.abort_all();
-                        while connections.join_next().await.is_some() {}
-                        return Err(CoreError::DeviceUnavailable(format!(
-                            "userspace tunnel RSD data-plane health check failed on port {rsd_port}: {error}"
-                        )));
+                let probe =
+                    tokio::time::timeout(Duration::from_secs(5), tunnel.connect(rsd_port)).await;
+                let failure = match probe {
+                    Ok(Ok(stream)) => {
+                        if probe_failures > 0 {
+                            debug!(%rsd_port, "userspace tunnel RSD data-plane probe recovered");
+                        }
+                        probe_failures = 0;
+                        drop(stream);
+                        None
                     }
-                    Err(_) => {
-                        connections.abort_all();
-                        while connections.join_next().await.is_some() {}
-                        return Err(CoreError::Timeout(format!(
-                            "userspace tunnel RSD data-plane health check timed out on port {rsd_port}"
-                        )));
+                    Ok(Err(error)) => Some(format!("failed: {error}")),
+                    Err(_) => Some("timed out after 5 seconds".to_string()),
+                };
+                if let Some(detail) = failure {
+                    probe_failures += 1;
+                    match probe_failure_verdict(probe_failures) {
+                        ProbeFailureVerdict::KeepTunnel => {
+                            warn!(
+                                %rsd_port,
+                                failures = probe_failures,
+                                threshold = PROBE_FAILURES_BEFORE_REBUILD,
+                                "userspace tunnel RSD data-plane probe {detail}; keeping tunnel and existing connections"
+                            );
+                        }
+                        ProbeFailureVerdict::Rebuild => {
+                            connections.abort_all();
+                            while connections.join_next().await.is_some() {}
+                            return Err(CoreError::DeviceUnavailable(format!(
+                                "userspace tunnel RSD data-plane health check {detail} on port {rsd_port} ({PROBE_FAILURES_BEFORE_REBUILD} consecutive probe failures)"
+                            )));
+                        }
                     }
                 }
             }
@@ -6772,6 +6844,7 @@ mod tests {
             pid: None,
             process: None,
             os_trace: None,
+            watch_kill_targets: None,
         }
     }
 
@@ -6884,6 +6957,7 @@ mod tests {
                 is_ui_test: true,
             }],
             output_path: None,
+            junit_output_path: None,
             source_xctestrun_path: None,
             timeout_ms: None,
         }
@@ -7816,7 +7890,9 @@ mod tests {
         wait_state(&manager, record.id, RuntimeState::Running).await;
 
         backend.set_connect_failure(true);
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        // 探针迟滞（同步 fork 3172596）：连续 PROBE_FAILURES_BEFORE_REBUILD=3 次
+        // 失败（2s 间隔）才进入 BackingOff。
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
         loop {
             let record = manager.show(record.id).await.unwrap();
             if record.runtime_state == RuntimeState::BackingOff {
@@ -7851,6 +7927,46 @@ mod tests {
         let mut bytes = [0_u8; 8];
         stream.read_exact(&mut bytes).await.unwrap();
         assert_eq!(&bytes, b"restored");
+
+        manager.stop(TaskSelector::Id(record.id)).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn userspace_tunnel_survives_transient_data_plane_failure() {
+        // 探针迟滞：少于阈值的连续失败只告警并保留隧道，不触发重建。
+        let directory = tempfile::tempdir().unwrap();
+        let backend = MockDeviceBackend::new();
+        backend.attach_usb("mock-phone").await;
+        let manager = manager(backend.clone(), &directory.path().join("state.json")).await;
+        let record = manager.start_tunnel(tunnel_spec()).await.unwrap();
+        wait_state(&manager, record.id, RuntimeState::Running).await;
+
+        // 2.5s 保证至少一次探针失败（间隔 2s），但少于 3 次阈值。
+        backend.set_connect_failure(true);
+        tokio::time::sleep(Duration::from_millis(2500)).await;
+        backend.set_connect_failure(false);
+
+        // 数据面恢复：隧道从未重建（attempt/tunnel 计数不变）。
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let record = manager.show(record.id).await.unwrap();
+            let running = record.runtime_state == RuntimeState::Running;
+            let tunnels = backend.tunnel_count();
+            if running && tunnels == 1 {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "tunnel did not stay up: state {:?}, tunnels {tunnels}",
+                record.runtime_state
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(
+            manager.show(record.id).await.unwrap().attempts,
+            1,
+            "a transient probe failure must not rebuild the tunnel"
+        );
 
         manager.stop(TaskSelector::Id(record.id)).await.unwrap();
     }
@@ -8754,5 +8870,24 @@ mod tests {
                 .contains("RemotePairing identity is missing")
         );
         manager.stop(TaskSelector::Id(task.id)).await.unwrap();
+    }
+
+    #[test]
+    fn probe_failure_verdict_debounces_before_rebuild() {
+        // 同步 go-ios fork 3172596:连续失败未达阈值保留隧道,达到阈值才重建。
+        assert_eq!(probe_failure_verdict(0), ProbeFailureVerdict::KeepTunnel);
+        assert_eq!(probe_failure_verdict(1), ProbeFailureVerdict::KeepTunnel);
+        assert_eq!(
+            probe_failure_verdict(PROBE_FAILURES_BEFORE_REBUILD - 1),
+            ProbeFailureVerdict::KeepTunnel
+        );
+        assert_eq!(
+            probe_failure_verdict(PROBE_FAILURES_BEFORE_REBUILD),
+            ProbeFailureVerdict::Rebuild
+        );
+        assert_eq!(
+            probe_failure_verdict(PROBE_FAILURES_BEFORE_REBUILD + 5),
+            ProbeFailureVerdict::Rebuild
+        );
     }
 }

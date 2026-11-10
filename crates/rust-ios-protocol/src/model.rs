@@ -544,6 +544,10 @@ pub struct StreamTaskSpec {
     pub process: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub os_trace: Option<OsTraceOptions>,
+    /// `kill --watch` 目标（同步 go-ios `5f16b28` WatchKill）：通知流匹配到目标
+    /// 进入 Running 状态时，在同一条 DVT 连接的 processControl 通道上秒杀。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub watch_kill_targets: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -787,6 +791,9 @@ pub struct XCTestSpec {
     pub targets: Vec<XCTestTargetSpec>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_path: Option<String>,
+    /// JUnit XML 输出路径（同步 go-ios `runtest --junit-output`，aeda162）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub junit_output_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_xctestrun_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1175,6 +1182,7 @@ mod tests {
                 message_excludes: Some("ignored".into()),
                 follow: true,
             }),
+            watch_kill_targets: None,
         });
         let encoded = serde_json::to_value(spec).unwrap();
         assert_eq!(encoded["configuration"]["os_trace"]["levels"][0], "error");
@@ -1219,6 +1227,7 @@ mod tests {
             pid: None,
             process: None,
             os_trace: None,
+            watch_kill_targets: None,
         });
         assert_eq!(stream.kind(), TaskKind::Syslog);
 
@@ -1471,6 +1480,7 @@ mod tests {
                 is_ui_test: true,
             }],
             output_path: Some("C:/captures/xctest.jsonl".into()),
+            junit_output_path: Some("C:/captures/xctest-junit.xml".into()),
             source_xctestrun_path: None,
             timeout_ms: Some(60_000),
         }));

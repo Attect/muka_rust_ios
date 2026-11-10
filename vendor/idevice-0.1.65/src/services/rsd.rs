@@ -8,6 +8,10 @@ use tracing::{debug, warn};
 
 use crate::{IdeviceError, ReadWrite, RemoteXpcClient, provider::RsdProvider};
 
+/// 设备握手未携带 `RemoteXPCVersionFlags` 时 host announce 的回退值（旧版
+/// `send_device_handshake` 的固定值）。正常设备都会声明 flags，此常量仅为兼容。
+const LEGACY_REMOTE_XPC_VERSION_FLAGS: u64 = 0x0100_0000_0000_0006;
+
 /// Describes an available XPC service
 #[derive(Debug, Clone, Deserialize)]
 pub struct RsdService {
@@ -35,12 +39,24 @@ impl RsdHandshake {
     pub async fn new(socket: impl ReadWrite) -> Result<Self, IdeviceError> {
         let mut xpc_client = RemoteXpcClient::new(socket).await?;
         xpc_client.do_handshake().await?;
-        xpc_client.send_device_handshake().await?;
+        // 先接收并解析设备握手：所有解析失败都发生在 announce 之前，此时 host
+        // 尚未向 remoted 声明自己，整个握手可以安全重试（go-ios 6910f3b 的
+        // 发送次序不变量）。
         let data = xpc_client.recv_root().await?;
 
-        let services_dict = match data
-            .as_dictionary()
-            .and_then(|x| x.get("Services"))
+        let dict = match data.as_dictionary() {
+            Some(d) => d,
+            None => {
+                return Err(IdeviceError::UnexpectedResponse(
+                    "RSD handshake is not a dictionary".into(),
+                ));
+            }
+        };
+
+        // Parse available services
+        let mut services: HashMap<String, RsdService> = HashMap::new();
+        let services_dict = match dict
+            .get("Services")
             .and_then(|x| x.as_dictionary())
         {
             Some(d) => d,
@@ -50,9 +66,6 @@ impl RsdHandshake {
                 ));
             }
         };
-
-        // Parse available services
-        let mut services: HashMap<String, RsdService> = HashMap::new();
         for (name, service) in services_dict.into_iter() {
             match service.as_dictionary() {
                 Some(service) => {
@@ -121,9 +134,8 @@ impl RsdHandshake {
             }
         }
 
-        let protocol_version = match data.as_dictionary().and_then(|x| {
-            x.get("MessagingProtocolVersion")
-                .and_then(|x| x.as_signed_integer())
+        let protocol_version = match dict.get("MessagingProtocolVersion").and_then(|x| {
+            x.as_signed_integer()
         }) {
             Some(p) => p as usize,
             None => {
@@ -133,10 +145,7 @@ impl RsdHandshake {
             }
         };
 
-        let uuid = match data
-            .as_dictionary()
-            .and_then(|x| x.get("UUID").and_then(|x| x.as_string()))
-        {
+        let uuid = match dict.get("UUID").and_then(|x| x.as_string()) {
             Some(u) => u.to_string(),
             None => {
                 return Err(IdeviceError::UnexpectedResponse(
@@ -145,9 +154,9 @@ impl RsdHandshake {
             }
         };
 
-        let properties = match data
-            .as_dictionary()
-            .and_then(|x| x.get("Properties").and_then(|x| x.as_dictionary()))
+        let properties = match dict
+            .get("Properties")
+            .and_then(|x| x.as_dictionary())
         {
             Some(d) => d
                 .into_iter()
@@ -159,6 +168,19 @@ impl RsdHandshake {
                 ));
             }
         };
+
+        // 设备握手解析成功后 announce 恰一次：回显设备声明的 MessagingProtocolVersion
+        // 与 RemoteXPCVersionFlags，携带新的 BootSessionUUID（同步 go-ios `6910f3b`/
+        // `51887da`）。设备缺 flags 时回退旧版固定值。
+        let version_flags = properties
+            .get("RemoteXPCVersionFlags")
+            .and_then(|x| x.as_signed_integer())
+            .filter(|value| *value >= 0)
+            .map(|value| value as u64)
+            .unwrap_or(LEGACY_REMOTE_XPC_VERSION_FLAGS);
+        xpc_client
+            .send_host_handshake(protocol_version as u64, version_flags)
+            .await?;
 
         Ok(Self {
             services,

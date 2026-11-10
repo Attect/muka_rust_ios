@@ -65,6 +65,12 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 use super::errors::DvtError;
 use crate::{IdeviceError, pretty_print_plist};
 
+/// DVT 分片消息的防御性上限（rust-ios 受控补丁，与 ios-core dtx 的 128 MiB
+/// 消息 / 1024 分片同级）。正常 instruments 消息远低于此值；wire 头声明的
+/// 分片计数与长度不可信，超限直接拒绝而不是驱动无界分配。
+const MAX_DVT_MESSAGE_SIZE: usize = 128 * 1024 * 1024;
+const MAX_DVT_FRAGMENTS: usize = 1024;
+
 /// Message header containing metadata about the message
 ///
 /// 32-byte structure that appears at the start of every message
@@ -608,6 +614,25 @@ impl Message {
                 },
                 expects_reply: u32::from_le_bytes([buf[28], buf[29], buf[30], buf[31]]) == 1,
             };
+            // wire 头是不可信输入：分片计数、单分片长度与累计消息体积都需要防御性
+            // 上限（与 ios-core dtx 的 128 MiB/1024 分片同级），否则损坏流会驱动
+            // `vec![0; length]` 无界分配或死循环读取（rust-ios 受控补丁）。
+            if header.fragment_count == 0 {
+                return Err(IdeviceError::UnexpectedResponse(
+                    "DVT message declares zero fragments".into(),
+                ));
+            }
+            if header.fragment_count as usize > MAX_DVT_FRAGMENTS {
+                return Err(IdeviceError::UnexpectedResponse(format!(
+                    "DVT message declares {} fragments, exceeding the {MAX_DVT_FRAGMENTS} fragment limit",
+                    header.fragment_count
+                )));
+            }
+            if packet_data.len().saturating_add(header.length as usize) > MAX_DVT_MESSAGE_SIZE {
+                return Err(IdeviceError::UnexpectedResponse(format!(
+                    "DVT message exceeds the {MAX_DVT_MESSAGE_SIZE} byte size limit"
+                )));
+            }
             if header.fragment_count > 1 && header.fragment_id == 0 {
                 // when reading multiple message fragments, the first fragment contains only a message header.
                 continue;

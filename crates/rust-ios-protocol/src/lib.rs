@@ -5,6 +5,7 @@
 //! clients to understand Apple protocols.
 
 mod codec;
+pub mod junit;
 mod model;
 
 pub use codec::{FrameError, MAX_FRAME_LEN, read_json_frame, write_json_frame};

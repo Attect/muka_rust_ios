@@ -7,12 +7,36 @@
 //!
 //! Handles the complete workflow from uploading images to mounting them with proper signatures.
 
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 #[cfg(feature = "rsd")]
 use crate::RsdService;
 use crate::{Idevice, IdeviceError, IdeviceService, obf};
 use sha2::{Digest, Sha384};
+
+/// image mounter 拒绝响应的形状(对齐 go-ios `deviceRefusedError`,同步 65bbc9f):
+/// 命令未执行时响应带 `Error` 键,`DetailedError` 携带人类可读细节;两者皆可缺席。
+fn device_refusal(res: &plist::Dictionary) -> Option<(String, Option<String>)> {
+    let error = match res.get("Error") {
+        Some(plist::Value::String(value)) => value.clone(),
+        _ => return None,
+    };
+    let detail = match res.get("DetailedError") {
+        Some(plist::Value::String(value)) => Some(value.clone()),
+        _ => None,
+    };
+    Some((error, detail))
+}
+
+/// 判定挂载拒绝是否为「镜像已挂载」:个性化 DDI 已挂载并驻留于 /System/Developer 时,
+/// `LookupImage` 可能返回空签名(image mounter 服务注册表与 OS 级挂载脱节,直到设备
+/// 重启),因此挂载拒绝中的 already mounted 是镜像存在的唯一可靠信号;将其视为成功
+/// 使挂载幂等。同步 go-ios 65bbc9f `isImageAlreadyMountedError`(2026-11-09 测试 iPhone
+/// / iOS 27.2 真机复现:LookupImage 无签名,挂载被 'already mounted' 拒绝)。
+fn is_already_mounted_refusal(error: &str, detail: Option<&str>) -> bool {
+    error == "ImageMountFailed"
+        && detail.is_some_and(|detail| detail.contains("already mounted"))
+}
 
 #[cfg(feature = "tss")]
 use crate::tss::TSSRequest;
@@ -241,6 +265,19 @@ impl ImageMounter {
 
         let res = self.idevice.read_plist().await?;
 
+        // 设备拒绝时响应带 `Error` 键;ImageMountFailed + already mounted 表示镜像
+        // 已在设备上,视为挂载成功以保持幂等(见 is_already_mounted_refusal)。
+        if let Some((error, detail)) = device_refusal(&res) {
+            if is_already_mounted_refusal(&error, detail.as_deref()) {
+                info!("developer image is already mounted on the device; treating the mount as done");
+                return Ok(());
+            }
+            return Err(IdeviceError::UnexpectedResponse(format!(
+                "MountImage refused by device: {error}: {}",
+                detail.as_deref().unwrap_or("<no detail>")
+            )));
+        }
+
         match res.get("Status") {
             Some(plist::Value::String(s)) => {
                 if s.as_str() != "Complete" {
@@ -281,6 +318,18 @@ impl ImageMounter {
         self.idevice.send_plist(req).await?;
 
         let res = self.idevice.read_plist().await?;
+        // 旧设备以 Error: UnknownCommand 拒绝 UnmountImage(go-ios readUnmountResponse
+        // 视为 no-op);也有固件以 Status: UnknownCommand 应答,两种形状都按 no-op 处理。
+        if let Some((error, detail)) = device_refusal(&res) {
+            if error == "UnknownCommand" {
+                debug!("device does not support unmounting developer disk images");
+                return Ok(());
+            }
+            return Err(IdeviceError::UnexpectedResponse(format!(
+                "UnmountImage refused by device: {error}: {}",
+                detail.as_deref().unwrap_or("<no detail>")
+            )));
+        }
         match res.get("Status") {
             Some(plist::Value::String(s)) if s.as_str() == "Complete" => Ok(()),
             // Older devices reject UnmountImage with UnknownCommand; treat it
@@ -781,5 +830,65 @@ impl crate::RsdService for ImageMounter {
         let mut idevice = crate::Idevice::new(stream, "");
         idevice.rsd_checkin().await?;
         Ok(Self::new(idevice))
+    }
+}
+
+#[cfg(test)]
+mod refusal_tests {
+    use super::{device_refusal, is_already_mounted_refusal};
+
+    fn reply(error: Option<&str>, detail: Option<&str>) -> plist::Dictionary {
+        let mut dict = plist::Dictionary::new();
+        if let Some(error) = error {
+            dict.insert("Error".into(), plist::Value::String(error.into()));
+        }
+        if let Some(detail) = detail {
+            dict.insert("DetailedError".into(), plist::Value::String(detail.into()));
+        }
+        dict
+    }
+
+    // iOS 27.2 (测试 iPhone) 真机样本:个性化镜像仍挂载于 /System/Developer 时再次挂载。
+    // 该状态下 LookupImage 无签名,挂载拒绝本身是镜像存在的唯一信号。
+    const ALREADY_MOUNTED_DETAIL: &str = concat!(
+        r#"Error Domain=com.apple.MobileStorage.ErrorDomain Code=-2 "Failed to mount /private/var/.../tYxqyy.dmg." "#,
+        r#"UserInfo={NSLocalizedDescription=Invalid value for MountPath: Error Domain=com.apple.MobileStorage.ErrorDomain Code=-3 "#,
+        r#""A disk image of type Personalized/DeveloperDiskImage is already mounted at /System/Developer."}"#
+    );
+    // iOS 26.5.2 真机样本:Developer Mode 未开启时挂载。
+    const DEVELOPER_MODE_DISABLED_DETAIL: &str = concat!(
+        r#"Error Domain=com.apple.MobileStorage.ErrorDomain Code=-2 "Failed to mount /private/var/.../CAKBOG.dmg." "#,
+        r#"UserInfo={NSUnderlyingError=Code=-4 "Developer mode is not enabled."}"#
+    );
+
+    #[test]
+    fn refusal_requires_error_key() {
+        assert_eq!(device_refusal(&reply(None, None)), None);
+        assert_eq!(
+            device_refusal(&reply(Some("DeviceLocked"), None)),
+            Some(("DeviceLocked".into(), None))
+        );
+        assert_eq!(
+            device_refusal(&reply(Some("InternalError"), Some("detail text"))),
+            Some(("InternalError".into(), Some("detail text".into())))
+        );
+    }
+
+    #[test]
+    fn already_mounted_refusal_matches_real_device_sample() {
+        assert!(is_already_mounted_refusal(
+            "ImageMountFailed",
+            Some(ALREADY_MOUNTED_DETAIL)
+        ));
+        // 无 detail 或 detail 不含 already mounted 时不视为已挂载。
+        assert!(!is_already_mounted_refusal("ImageMountFailed", None));
+        assert!(!is_already_mounted_refusal(
+            "ImageMountFailed",
+            Some(DEVELOPER_MODE_DISABLED_DETAIL)
+        ));
+        assert!(!is_already_mounted_refusal(
+            "DeviceLocked",
+            Some(ALREADY_MOUNTED_DETAIL)
+        ));
     }
 }

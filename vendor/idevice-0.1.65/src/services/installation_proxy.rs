@@ -375,11 +375,30 @@ impl InstallationProxyClient {
 
         self.idevice.send_plist(command).await?;
 
+        // Browse 流式回复上限，同步 go-ios `de44995`（issue-818）：设备不发
+        // Complete 或连接挂起时原循环无界累积（go-ios 实测 ~2.1GB live heap）。
+        // 1000 个无 Complete 的 chunk 与 100 万条记录是正常设备远达不到的
+        // 防御性阈值（rust-ios 受控补丁）。
+        const MAX_BROWSE_CHUNKS: usize = 1000;
+        const MAX_BROWSE_ENTRIES: usize = 1_000_000;
+
         let mut values = Vec::new();
+        let mut chunks = 0_usize;
         loop {
+            chunks += 1;
+            if chunks > MAX_BROWSE_CHUNKS {
+                return Err(IdeviceError::UnexpectedResponse(format!(
+                    "installation proxy browse exceeded {MAX_BROWSE_CHUNKS} chunks without a Complete status"
+                )));
+            }
             let mut res = self.idevice.read_plist().await?;
 
             if let Some(list) = res.remove("CurrentList").and_then(|x| x.into_array()) {
+                if values.len().saturating_add(list.len()) > MAX_BROWSE_ENTRIES {
+                    return Err(IdeviceError::UnexpectedResponse(format!(
+                        "installation proxy browse exceeded the {MAX_BROWSE_ENTRIES} entry limit"
+                    )));
+                }
                 for v in list.into_iter() {
                     values.push(v);
                 }

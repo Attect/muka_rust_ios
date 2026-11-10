@@ -400,7 +400,8 @@ impl DeviceBackend for IdeviceBackend {
                         "instruments notifications requires JSON Lines format".into(),
                     ));
                 }
-                start_notifications_stream(provider, tunnel).await
+                start_notifications_stream(provider, tunnel, spec.watch_kill_targets.as_deref())
+                    .await
             }
             TaskKind::Sysmontap => {
                 if spec.format != StreamFormat::JsonLines {
@@ -1245,7 +1246,8 @@ impl DeviceBackend for IdeviceBackend {
                     }
                 }
             }
-            "image" => command_image(&provider, invocation).await?,
+            "image" => command_image(&provider, invocation, tunnel.as_deref()).await?,
+            "hid" => command_hid(invocation, tunnel.as_deref(), &mut warnings).await?,
             "ps" => {
                 let mut remote = connect_dvt(&provider, tunnel.as_deref()).await?;
                 let mut service = idevice::dvt::device_info::DeviceInfoClient::new(&mut remote)
@@ -1414,19 +1416,65 @@ impl DeviceBackend for IdeviceBackend {
                             .into(),
                     ));
                 }
-                let mut remote = connect_dvt(&provider, tunnel.as_deref()).await?;
-                let mut client = idevice::dvt::screenshot::ScreenshotClient::new(&mut remote)
-                    .await
-                    .map_err(map_device_error)?;
-                let bytes = client.take_screenshot().await.map_err(map_device_error)?;
-                let raw_output = option_value(&invocation.argv, "--output")
-                    .unwrap_or_else(|| "screenshot.png".into());
-                let output = resolve_client_path(invocation, &raw_output);
-                if let Some(parent) = output.parent() {
-                    tokio::fs::create_dir_all(parent).await?;
+                // 同步 go-ios `51887da`：`--display <unique-id>` 指定显示器时走
+                // CoreDevice `screencaptureservice`（需运行中的 tunnel；服务由
+                // 新版 DDI 提供），不指定时保持原有 DVT 单屏路径。
+                if let Some(display_id) = option_value(&invocation.argv, "--display") {
+                    let Some(tunnel) = tunnel.as_deref() else {
+                        return Err(CoreError::DeviceUnavailable(
+                            "--display screenshot requires a running server-owned userspace tunnel; run tunnel start --userspace".into(),
+                        ));
+                    };
+                    let io = tunnel
+                        .connect_rsd_service(RsdServiceKind::ScreenCapture)
+                        .await?;
+                    let socket: Box<dyn idevice::ReadWrite> = Box::new(IdeviceSharedRsdSocket(io));
+                    let mut client =
+                        idevice::services::core_device::ScreenCaptureServiceClient::from_stream(
+                            socket,
+                        )
+                        .await
+                        .map_err(map_device_error)?;
+                    let display_id = if display_id.is_empty() {
+                        None
+                    } else {
+                        Some(display_id.as_str())
+                    };
+                    let bytes = client
+                        .take_screenshot(
+                            display_id,
+                            idevice::services::core_device::ImageFormat::Png,
+                        )
+                        .await
+                        .map_err(map_device_error)?;
+                    let raw_output = option_value(&invocation.argv, "--output")
+                        .unwrap_or_else(|| "screenshot.png".into());
+                    let output = resolve_client_path(invocation, &raw_output);
+                    if let Some(parent) = output.parent() {
+                        tokio::fs::create_dir_all(parent).await?;
+                    }
+                    tokio::fs::write(&output, &bytes).await?;
+                    json!({
+                        "output": output,
+                        "bytes": bytes.len(),
+                        "display": display_id,
+                        "mode": "coredevice-screencapture",
+                    })
+                } else {
+                    let mut remote = connect_dvt(&provider, tunnel.as_deref()).await?;
+                    let mut client = idevice::dvt::screenshot::ScreenshotClient::new(&mut remote)
+                        .await
+                        .map_err(map_device_error)?;
+                    let bytes = client.take_screenshot().await.map_err(map_device_error)?;
+                    let raw_output = option_value(&invocation.argv, "--output")
+                        .unwrap_or_else(|| "screenshot.png".into());
+                    let output = resolve_client_path(invocation, &raw_output);
+                    if let Some(parent) = output.parent() {
+                        tokio::fs::create_dir_all(parent).await?;
+                    }
+                    tokio::fs::write(&output, &bytes).await?;
+                    json!({ "output": output, "bytes": bytes.len() })
                 }
-                tokio::fs::write(&output, &bytes).await?;
-                json!({ "output": output, "bytes": bytes.len() })
             }
             _ => {
                 return Err(CoreError::NotImplemented(format!(
@@ -2078,7 +2126,7 @@ impl idevice::dvt::xctest::XCTestRsdProvider for SharedXCTestRsdProvider {
 }
 
 #[derive(Debug)]
-struct IdeviceSharedRsdSocket(BoxedIo);
+pub(crate) struct IdeviceSharedRsdSocket(pub(crate) BoxedIo);
 
 impl AsyncRead for IdeviceSharedRsdSocket {
     fn poll_read(
@@ -2271,7 +2319,9 @@ impl DeviceStream for IdeviceDvtWorkerStream {
 async fn start_notifications_stream(
     provider: UsbmuxdProvider,
     tunnel: Option<Arc<dyn UserSpaceTunnel>>,
+    watch_kill_targets: Option<&[String]>,
 ) -> CoreResult<Box<dyn DeviceStream>> {
+    let watch_kill_targets: Vec<String> = watch_kill_targets.unwrap_or(&[]).to_vec();
     let service_transport = dvt_service_transport(tunnel.as_ref());
     let (sender, receiver) = mpsc::channel(16);
     let (ready_sender, ready_receiver) = oneshot::channel();
@@ -2285,35 +2335,84 @@ async fn start_notifications_stream(
                 return;
             }
         };
-        let mut client =
-            match idevice::dvt::notifications::NotificationsClient::new(&mut remote).await {
-                Ok(client) => client,
-                Err(error) => {
-                    let _ = ready_sender.send(Err(map_device_error(error)));
-                    return;
-                }
-            };
-        if let Err(error) = client.start_notifications().await {
-            let _ = ready_sender.send(Err(map_device_error(error)));
-            return;
-        }
+        // kill --watch（同步 go-ios `5f16b28` WatchKill）：通知流匹配到目标进入
+        // Running 状态时，在同一条 DVT 连接的 processControl 通道上秒杀——go-ios
+        // 实测第二连接秒杀会间歇失败，必须共享连接（这里共用同一 remote/socket）。
+        // 客户端以 Option 持有：秒杀前让作用域结束其对 remote 的独占借用。
+        let mut client = Some(match attach_notifications_client(&mut remote).await {
+            Ok(client) => client,
+            Err(error) => {
+                let _ = ready_sender.send(Err(error));
+                return;
+            }
+        });
         if ready_sender.send(Ok(())).is_err() {
-            let _ = client.stop_notifications().await;
+            if let Some(client) = client.as_mut() {
+                let _ = client.stop_notifications().await;
+            }
             return;
         }
         loop {
             tokio::select! {
                 () = worker_cancel.cancelled() => {
-                    let _ = tokio::time::timeout(
-                        Duration::from_secs(2),
-                        client.stop_notifications(),
-                    ).await;
+                    if let Some(client) = client.as_mut() {
+                        let _ = tokio::time::timeout(
+                            Duration::from_secs(2),
+                            client.stop_notifications(),
+                        ).await;
+                    }
                     return;
                 }
-                result = client.get_notification() => {
-                    let result = result
-                        .map_err(map_device_error)
-                        .and_then(notification_json_line);
+                notification = async { client.as_mut().expect("notifications client attached").get_notification().await } => {
+                    let notification = match notification {
+                        Ok(notification) => notification,
+                        Err(error) => {
+                            let _ = sender.send(Err(map_device_error(error))).await;
+                            return;
+                        }
+                    };
+                    // 命中 WatchKill 目标：先让通知客户端离开作用域（释放 remote
+                    // 借用），在同一 remote 上开 processControl 通道秒杀，再恢复
+                    // 通知流。
+                    let kill = if notification.state_description.eq_ignore_ascii_case("running") {
+                        watch_kill_targets.iter().enumerate().find(|(_, target)| {
+                            matches_watch_kill_target(&notification, target)
+                        })
+                    } else {
+                        None
+                    };
+                    if let Some((_, target)) = kill {
+                        {
+                            let mut detached = client.take().expect("notifications client attached");
+                            let _ = tokio::time::timeout(
+                                Duration::from_secs(2),
+                                detached.stop_notifications(),
+                            ).await;
+                        }
+                        let killed = kill_via_process_control(&mut remote, notification.pid).await;
+                        match attach_notifications_client(&mut remote).await {
+                            Ok(attached) => client = Some(attached),
+                            Err(error) => {
+                                let _ = sender.send(Err(error)).await;
+                                return;
+                            }
+                        }
+                        let kill_info = json!({
+                            "target": target,
+                            "pid": notification.pid,
+                            "killed": killed.is_ok(),
+                            "error": killed.as_ref().err().map(ToString::to_string),
+                        });
+                        let line = notification_json_line(&notification, Some(kill_info))
+                            .map_err(|error| CoreError::Backend(error.to_string()));
+                        let failed = line.is_err();
+                        if sender.send(line).await.is_err() || failed {
+                            return;
+                        }
+                        continue;
+                    }
+                    let result = notification_json_line(&notification, None)
+                        .map_err(|error| CoreError::Backend(error.to_string()));
                     let failed = result.is_err();
                     if sender.send(result).await.is_err() || failed {
                         return;
@@ -2464,7 +2563,7 @@ async fn start_sysmontap_stream(
                 return;
             }
         };
-        let config = sysmontap_config(process_attributes, system_attributes);
+        let config = sysmontap_config(process_attributes.clone(), system_attributes.clone());
         if let Err(error) = channel
             .call_method(
                 Some(plist::Value::String("setConfig:".into())),
@@ -2495,6 +2594,25 @@ async fn start_sysmontap_stream(
                 .await;
             return;
         }
+        // sysmontap JSON v1 帧契约（同步 go-ios fork `505b391`）：首行 attributes
+        // 帧声明属性名，消费方按名对齐后续 system/processes 帧的值数组。
+        match sysmontap_attributes_frame(&process_attributes, &system_attributes) {
+            Ok(frame) => {
+                if sender.send(Ok(frame)).await.is_err() {
+                    let _ = channel
+                        .call_method(Some(plist::Value::String("stop".into())), None, false)
+                        .await;
+                    return;
+                }
+            }
+            Err(error) => {
+                let _ = channel
+                    .call_method(Some(plist::Value::String("stop".into())), None, false)
+                    .await;
+                let _ = sender.send(Err(error)).await;
+                return;
+            }
+        }
         loop {
             tokio::select! {
                 () = worker_cancel.cancelled() => {
@@ -2508,7 +2626,7 @@ async fn start_sysmontap_stream(
                     ).await;
                     return;
                 }
-                result = next_sysmontap_json_line(&mut channel) => {
+                result = next_sysmontap_json_line(&mut channel, &process_attributes, &system_attributes) => {
                     let failed = result.is_err();
                     if sender.send(result).await.is_err() || failed {
                         return;
@@ -2542,19 +2660,74 @@ async fn start_sysmontap_stream(
 }
 
 fn notification_json_line(
-    notification: idevice::dvt::notifications::NotificationInfo,
+    notification: &idevice::dvt::notifications::NotificationInfo,
+    watch_kill: Option<Value>,
 ) -> CoreResult<Vec<u8>> {
-    let mut bytes = serde_json::to_vec(&json!({
+    let mut payload = json!({
         "notificationType": notification.notification_type,
         "machAbsoluteTime": notification.mach_absolute_time,
         "execName": notification.exec_name,
         "appName": notification.app_name,
         "pid": notification.pid,
         "stateDescription": notification.state_description,
-    }))
-    .map_err(|error| CoreError::Backend(error.to_string()))?;
+    });
+    if let Some(watch_kill) = watch_kill {
+        payload["watchKill"] = watch_kill;
+    }
+    let mut bytes =
+        serde_json::to_vec(&payload).map_err(|error| CoreError::Backend(error.to_string()))?;
     bytes.push(b'\n');
     Ok(bytes)
+}
+
+/// 建立并启动 instruments 通知通道（WatchKill 秒杀后重挂也走这里）。
+async fn attach_notifications_client(
+    remote: &mut DvtClient,
+) -> CoreResult<idevice::dvt::notifications::NotificationsClient<'_, Box<dyn idevice::ReadWrite>>> {
+    let mut client = idevice::dvt::notifications::NotificationsClient::new(remote)
+        .await
+        .map_err(map_device_error)?;
+    client
+        .start_notifications()
+        .await
+        .map_err(map_device_error)?;
+    Ok(client)
+}
+
+/// WatchKill 目标匹配：目标名与 execName/appName 全名或叶子名（`.` 后段）
+/// 大小写不敏感比对（go-ios 以 CFBundleExecutable 对齐）。
+fn matches_watch_kill_target(
+    notification: &idevice::dvt::notifications::NotificationInfo,
+    target: &str,
+) -> bool {
+    let target = target.trim().to_ascii_lowercase();
+    if target.is_empty() {
+        return false;
+    }
+    [
+        notification.exec_name.as_str(),
+        notification.app_name.as_str(),
+    ]
+    .iter()
+    .any(|name| {
+        let name = name.trim().to_ascii_lowercase();
+        name == target
+            || name
+                .rsplit_once('.')
+                .is_some_and(|(_, leaf)| leaf == target)
+    })
+}
+
+/// 在同一条 DVT 连接上打开 processControl 通道并秒杀进程（go-ios WatchKill：
+/// 必须共享连接，第二连接秒杀会间歇失败）。
+async fn kill_via_process_control(remote: &mut DvtClient, pid: u32) -> CoreResult<()> {
+    let mut control = idevice::dvt::process_control::ProcessControlClient::new(remote)
+        .await
+        .map_err(map_device_error)?;
+    control
+        .kill_app(u64::from(pid))
+        .await
+        .map_err(map_device_error)
 }
 
 async fn sysmontap_attributes(remote: &mut DvtClient) -> CoreResult<(Vec<String>, Vec<String>)> {
@@ -2621,34 +2794,152 @@ fn sysmontap_config(
 
 async fn next_sysmontap_json_line<R: idevice::ReadWrite>(
     channel: &mut idevice::dvt::remote_server::Channel<'_, R>,
+    process_attributes: &[String],
+    system_attributes: &[String],
 ) -> CoreResult<Vec<u8>> {
-    let sample = loop {
+    loop {
         let message = channel.read_message().await.map_err(map_device_error)?;
         if let Some(data) = message.data
             && let Some(sample) = find_sysmontap_sample(data)
+            && let Some(frame) = sysmontap_v1_frame(&sample, process_attributes, system_attributes)?
         {
-            break sample;
+            return Ok(frame);
         }
-    };
-    let processes = sample
-        .get("Processes")
-        .cloned()
-        .map(plist_json)
-        .transpose()?;
-    let system = sample.get("System").cloned().map(plist_json).transpose()?;
-    let system_cpu_usage = sample
-        .get("SystemCPUUsage")
-        .cloned()
-        .map(plist_json)
-        .transpose()?;
+        // 非 sample 控制帧：继续读下一条。
+    }
+}
+
+/// 首行 attributes 帧：声明 procAttrs/sysAttrs 供消费方按名对齐（fork
+/// `505b391` 的格式 v1 约定）。
+fn sysmontap_attributes_frame(
+    process_attributes: &[String],
+    system_attributes: &[String],
+) -> CoreResult<Vec<u8>> {
     let mut bytes = serde_json::to_vec(&json!({
-        "processes": processes,
-        "system": system,
-        "systemCpuUsage": system_cpu_usage,
+        "v": 1,
+        "type": "attributes",
+        "procAttrs": process_attributes,
+        "sysAttrs": system_attributes,
     }))
     .map_err(|error| CoreError::Backend(error.to_string()))?;
     bytes.push(b'\n');
     Ok(bytes)
+}
+
+/// sysmontap JSON v1 帧契约（同步 go-ios fork `505b391`）。设备按消息交替下发
+/// system 采样与 processes 采样：
+/// - system 帧：`{"v":1,"type":"system","cpuCount":..,"enabledCpus":..,
+///   "cpuTotalLoad":..,"endMachAbsTime":..,"systemAttributes":{按 sysAttrs 对齐}}`；
+/// - processes 帧：`{"v":1,"type":"processes","endMachAbsTime":..,"processes":[
+///   {"name":<map 键>, <其余 procAttrs 按名对齐>}]}`——procAttrs 槽位 1 是
+///   `name`（上游用它做 map 键），值数组不含该槽。
+///
+/// 返回 `None` 表示该消息不含可下发采样。
+fn sysmontap_v1_frame(
+    sample: &plist::Dictionary,
+    process_attributes: &[String],
+    system_attributes: &[String],
+) -> CoreResult<Option<Vec<u8>>> {
+    if sample.contains_key("System") {
+        let cpu_usage = sample
+            .get("SystemCPUUsage")
+            .and_then(|value| value.as_dictionary())
+            .cloned()
+            .unwrap_or_default();
+        let system_values = sample
+            .get("System")
+            .and_then(|value| value.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let mut aligned = serde_json::Map::new();
+        for (index, value) in system_values.iter().enumerate() {
+            let Some(name) = system_attributes.get(index) else {
+                break;
+            };
+            aligned.insert(name.clone(), plist_json_value(value)?);
+        }
+        let bytes = serde_json::to_vec(&json!({
+            "v": 1,
+            "type": "system",
+            "cpuCount": optional_plist_json(cpu_usage.get("CPUCount"))?,
+            "enabledCpus": optional_plist_json(cpu_usage.get("EnabledCPUs"))?,
+            "cpuTotalLoad": optional_plist_json(cpu_usage.get("CPU_TotalLoad"))?,
+            "endMachAbsTime": optional_plist_json(cpu_usage.get("EndMachAbsTime"))?,
+            "systemAttributes": Value::Object(aligned),
+        }))
+        .map_err(|error| CoreError::Backend(error.to_string()))?;
+        return Ok(Some(with_newline(bytes)));
+    }
+    if sample.contains_key("Processes") {
+        let end_mach_abs_time = optional_plist_json(sample.get("EndMachAbsTime").or_else(|| {
+            sample
+                .get("SystemCPUUsage")
+                .and_then(|value| value.as_dictionary())
+                .and_then(|dict| dict.get("EndMachAbsTime"))
+        }))?;
+        let mut processes = Vec::new();
+        if let Some(entries) = sample
+            .get("Processes")
+            .and_then(|value| value.as_dictionary())
+        {
+            for (name, values) in entries {
+                processes.push(process_frame_object(name, values, process_attributes)?);
+            }
+        }
+        let bytes = serde_json::to_vec(&json!({
+            "v": 1,
+            "type": "processes",
+            "endMachAbsTime": end_mach_abs_time,
+            "processes": processes,
+        }))
+        .map_err(|error| CoreError::Backend(error.to_string()))?;
+        return Ok(Some(with_newline(bytes)));
+    }
+    Ok(None)
+}
+
+/// 一个进程的命名字段对象（fork `processFrameObject`）：`name` 取 map 键，
+/// procAttrs 槽位 1（name 槽）跳过，其余属性与值数组 1:1 对齐。
+fn process_frame_object(
+    name: &str,
+    values: &plist::Value,
+    process_attributes: &[String],
+) -> CoreResult<Value> {
+    let mut object = serde_json::Map::new();
+    object.insert("name".into(), Value::String(name.to_owned()));
+    let Some(values) = values.as_array() else {
+        return Ok(Value::Object(object));
+    };
+    let mut attribute_index = 0_usize;
+    for (index, attribute) in process_attributes.iter().enumerate() {
+        if index == 1 {
+            continue;
+        }
+        if attribute_index < values.len() {
+            object.insert(
+                attribute.clone(),
+                plist_json_value(&values[attribute_index])?,
+            );
+        }
+        attribute_index += 1;
+    }
+    Ok(Value::Object(object))
+}
+
+fn optional_plist_json(value: Option<&plist::Value>) -> CoreResult<Value> {
+    match value {
+        Some(value) => plist_json_value(value),
+        None => Ok(Value::Null),
+    }
+}
+
+fn plist_json_value(value: &plist::Value) -> CoreResult<Value> {
+    plist_json(value)
+}
+
+fn with_newline(mut bytes: Vec<u8>) -> Vec<u8> {
+    bytes.push(b'\n');
+    bytes
 }
 
 fn find_sysmontap_sample(value: plist::Value) -> Option<plist::Dictionary> {
@@ -3127,8 +3418,19 @@ impl UserSpaceTunnel for IdeviceKernelRouteTunnel {
                     self.info.server_address
                 ))
             })?;
-        let stream = TcpStream::connect(SocketAddrV6::new(address, port, 0, 0))
+        // 同步 go-ios `TunnelDialTimeout=15s`(fda20a7):设备挂死但 TUN 接口与路由仍在
+        // 时,裸拨号会吃满内核 SYN 超时(Linux ~135s),拖垮上层数据面探针。超时映射为
+        // `CoreError::Timeout`,等价 go-ios `ErrDialTimeout` 的陈旧隧道判定语义。
+        let dial = TcpStream::connect(SocketAddrV6::new(address, port, 0, 0));
+        let stream = tokio::time::timeout(TUNNEL_DIAL_TIMEOUT, dial)
             .await
+            .map_err(|_| {
+                CoreError::Timeout(format!(
+                    "connect [{}]:{port} through kernel tunnel timed out after {} seconds; device is unreachable through a stale tunnel route",
+                    self.info.server_address,
+                    TUNNEL_DIAL_TIMEOUT.as_secs()
+                ))
+            })?
             .map_err(|error| {
                 CoreError::DeviceUnavailable(format!(
                     "connect [{}]:{port} through kernel tunnel: {error}",
@@ -3239,7 +3541,18 @@ impl UserSpaceTunnel for IdeviceUserSpaceTunnel {
         let adapter = guard
             .as_mut()
             .ok_or_else(|| CoreError::DeviceUnavailable("tunnel is closed".into()))?;
-        let stream = adapter.connect(port).await.map_err(CoreError::Io)?;
+        // 与内核隧道一致的用户态拨号上限(同步 go-ios fda20a7):userspace 栈对无响应
+        // 设备同样可能长时间挂起,超时按陈旧隧道信号上报。
+        let connect = adapter.connect(port);
+        let stream = tokio::time::timeout(TUNNEL_DIAL_TIMEOUT, connect)
+            .await
+            .map_err(|_| {
+                CoreError::Timeout(format!(
+                    "userspace tunnel connect to port {port} timed out after {} seconds; device is unreachable through a stale tunnel",
+                    TUNNEL_DIAL_TIMEOUT.as_secs()
+                ))
+            })?
+            .map_err(CoreError::Io)?;
         Ok(Box::new(stream))
     }
 
@@ -4176,6 +4489,7 @@ fn plist_value_kind(value: &plist::Value) -> &'static str {
 async fn command_image(
     provider: &dyn IdeviceProvider,
     invocation: &CommandInvocation,
+    tunnel: Option<&dyn UserSpaceTunnel>,
 ) -> CoreResult<Value> {
     let action = invocation.argv.get(1).map(String::as_str).ok_or_else(|| {
         CoreError::InvalidArgument("image requires auto, list, mount or unmount".into())
@@ -4204,8 +4518,59 @@ async fn command_image(
         .unwrap_or(0);
 
     match action {
-        "list" => plist_json(mounter.copy_devices().await.map_err(map_device_error)?),
+        "list" => {
+            let mut images = plist_json(mounter.copy_devices().await.map_err(map_device_error)?)?;
+            // 同步 go-ios `ios17ImageMounter.List`：合并 cryptex 挂载器的列表
+            // （cryptex 以 `identifier@version` 字符串形式追加）。
+            if let Some(tunnel) = tunnel
+                && crate::cryptex::supports_cryptex_ddi(tunnel).await
+            {
+                let mut cryptex_client = crate::cryptex::connect_cryptex_client(tunnel).await?;
+                let installed = crate::cryptex::list_cryptexes(&mut cryptex_client).await?;
+                if let Some(array) = images.as_array_mut() {
+                    for entry in crate::cryptex::filter_ddi_cryptexes(&installed) {
+                        array.push(Value::String(entry));
+                    }
+                }
+            }
+            Ok(images)
+        }
         "unmount" => {
+            // 同步 go-ios `ios17ImageMounter.Unmount`：cryptex 优先——只有当
+            // cryptexd 里装有 DDI cryptex 时才走 uninstall；否则回落 lockdown
+            // 挂载器（无镜像卸载保持原行为）。
+            if let Some(tunnel) = tunnel
+                && crate::cryptex::supports_cryptex_ddi(tunnel).await
+            {
+                let mut cryptex_client = crate::cryptex::connect_cryptex_client(tunnel).await?;
+                let installed = crate::cryptex::list_cryptexes(&mut cryptex_client).await?;
+                if let Some(cryptex) = installed
+                    .iter()
+                    .find(|cryptex| cryptex.identifier == "com.apple.MobileAsset.DDI")
+                {
+                    let mut argv = idevice::xpc::Dictionary::new();
+                    argv.insert(
+                        "remote-cryptex-identifier".into(),
+                        idevice::xpc::XPCObject::String(cryptex.identifier.clone()),
+                    );
+                    argv.insert(
+                        "remote-cryptex-version".into(),
+                        idevice::xpc::XPCObject::String(cryptex.version.clone()),
+                    );
+                    crate::cryptex::cryptex_call(
+                        &mut cryptex_client,
+                        "uninstall",
+                        idevice::xpc::XPCObject::Dictionary(argv),
+                    )
+                    .await?;
+                    return Ok(json!({
+                        "status": "unmounted",
+                        "mode": "cryptex",
+                        "identifier": cryptex.identifier,
+                        "version": cryptex.version,
+                    }));
+                }
+            }
             let mount_path = if major_version >= 17 {
                 "/System/Developer"
             } else {
@@ -4220,6 +4585,13 @@ async fn command_image(
         "mount" | "auto" if major_version >= 17 => {
             let board_id = lockdown_unsigned_value(&mut lockdown, "BoardId").await?;
             let chip_id = lockdown_unsigned_value(&mut lockdown, "ChipID").await?;
+            // cryptexd.remote 挂载优先（同步 go-ios `NewImageMounter` 组合语义：
+            // cryptex 优先、personalized 兜底）；cryptexd 仅经隧道可达。
+            if let Some(tunnel) = tunnel
+                && crate::cryptex::supports_cryptex_ddi(tunnel).await
+            {
+                return command_image_cryptex(tunnel, invocation, action, board_id, chip_id).await;
+            }
             let unique_chip_id = lockdown_unsigned_value(&mut lockdown, "UniqueChipID").await?;
             let ddi = if action == "auto" {
                 let base_dir = resolve_client_path(
@@ -4243,6 +4615,34 @@ async fn command_image(
 
             let image = tokio::fs::read(&ddi.image_path).await?;
             let trust_cache = tokio::fs::read(&ddi.trust_cache_path).await?;
+            // 同步 go-ios `14f8098`（ensure mounted）：挂载前查已挂载镜像——同
+            // 镜像幂等返回；不同镜像先卸载再挂载。个性化镜像的已挂载签名就是
+            // dmg 的 SHA-384。
+            use sha2::Digest;
+            let image_hash = sha2::Sha384::digest(&image);
+            match mounter.lookup_image("Personalized").await {
+                Ok(signature) if signature == image_hash.to_vec() => {
+                    return Ok(json!({
+                        "status": "already-mounted",
+                        "mode": "personalized",
+                        "source": action,
+                        "buildVersion": ddi.build_version,
+                        "restoreDirectory": ddi.restore_dir,
+                        "image": ddi.image_path,
+                        "trustCache": ddi.trust_cache_path,
+                    }));
+                }
+                Ok(_) => {
+                    mounter
+                        .unmount_image("/System/Developer")
+                        .await
+                        .map_err(map_device_error)?;
+                }
+                // 无镜像或注册表脱节（iOS 27.2 挂载驻留态）：直接尝试挂载，
+                // already-mounted 拒绝会被 vendor 幂等处理。
+                Err(idevice::IdeviceError::NotFound) => {}
+                Err(error) => return Err(map_device_error(error)),
+            }
             mounter
                 .mount_personalized(
                     provider,
@@ -4315,6 +4715,244 @@ async fn command_image(
             "unknown image action {action:?}"
         ))),
     }
+}
+
+/// CoreDevice HID 合成输入（同步 go-ios `c584042`，rust 扩展命令；go-ios 同样只
+/// 提供库能力）。子命令：
+/// - `hid tap <x> <y> [--display=<n>]`：像素坐标单点触摸；
+/// - `hid swipe <x1> <y1> <x2> <y2> [--steps=<n>] [--display=<n>]`：路径滑动；
+/// - `hid button <usage-page> <usage-code>`：硬件按键（Down+Up）；
+/// - `hid key <usage-code>`：键盘键（HID Keyboard/Keypad 页，Down+Up）。
+///
+/// 认证门槛（与 go-ios vendored hid.rs 文档一致）：设备只在 displayservice 媒体
+/// 流活跃期间把合成事件路由为真实输入，否则静默丢弃（Xcode 打开的流也算）。
+/// 事件发送成功不等于已生效——结果中带 `requiresDisplayMediaStream` 提示。
+async fn command_hid(
+    invocation: &CommandInvocation,
+    tunnel: Option<&dyn UserSpaceTunnel>,
+    warnings: &mut Vec<String>,
+) -> CoreResult<Value> {
+    let tunnel = tunnel.ok_or_else(|| {
+        CoreError::DeviceUnavailable(
+            "hid requires a running server-owned userspace tunnel; run tunnel start --userspace"
+                .into(),
+        )
+    })?;
+    let action =
+        invocation.argv.get(1).map(String::as_str).ok_or_else(|| {
+            CoreError::InvalidArgument("hid requires tap|swipe|button|key".into())
+        })?;
+    let io = tunnel.connect_rsd_service(RsdServiceKind::Hid).await?;
+    let socket: Box<dyn idevice::ReadWrite> = Box::new(IdeviceSharedRsdSocket(io));
+    let mut client = idevice::services::core_device::IndigoHidClient::from_stream(socket)
+        .await
+        .map_err(map_device_error)?;
+    warnings.push(
+        "HID events only take effect while a displayservice media stream is active on the device; without it they are silently dropped".into(),
+    );
+    let positional = |index: usize| -> CoreResult<f64> {
+        invocation
+            .argv
+            .get(index)
+            .and_then(|value| value.parse::<f64>().ok())
+            .ok_or_else(|| {
+                CoreError::InvalidArgument(format!(
+                    "hid {action} requires a numeric argument at position {index}"
+                ))
+            })
+    };
+    let display_target = || -> CoreResult<idevice::services::core_device::DigitizerTarget> {
+        match option_value(&invocation.argv, "--display") {
+            Some(id) => id
+                .parse::<u64>()
+                .map(idevice::services::core_device::DigitizerTarget::Display)
+                .map_err(|_| CoreError::InvalidArgument("--display must be a display id".into())),
+            None => Ok(idevice::services::core_device::DigitizerTarget::MainScreen),
+        }
+    };
+    match action {
+        "tap" => {
+            let x = positional(2)?;
+            let y = positional(3)?;
+            let target = display_target()?;
+            client
+                .send_digitizer(
+                    (x, y),
+                    None,
+                    idevice::services::core_device::DigitizerEventType::Start,
+                    idevice::services::core_device::DigitizerEdge::None,
+                    target,
+                )
+                .await
+                .map_err(map_device_error)?;
+            tokio::time::sleep(Duration::from_millis(15)).await;
+            client
+                .send_digitizer(
+                    (x, y),
+                    None,
+                    idevice::services::core_device::DigitizerEventType::End,
+                    idevice::services::core_device::DigitizerEdge::None,
+                    target,
+                )
+                .await
+                .map_err(map_device_error)?;
+            Ok(json!({ "action": "tap", "x": x, "y": y }))
+        }
+        "swipe" => {
+            let x1 = positional(2)?;
+            let y1 = positional(3)?;
+            let x2 = positional(4)?;
+            let y2 = positional(5)?;
+            let steps = option_value(&invocation.argv, "--steps")
+                .and_then(|value| value.parse::<usize>().ok())
+                .filter(|value| *value >= 2)
+                .unwrap_or(8);
+            let target = display_target()?;
+            client
+                .send_digitizer(
+                    (x1, y1),
+                    None,
+                    idevice::services::core_device::DigitizerEventType::Start,
+                    idevice::services::core_device::DigitizerEdge::None,
+                    target,
+                )
+                .await
+                .map_err(map_device_error)?;
+            for step in 1..steps {
+                let ratio = step as f64 / steps as f64;
+                let x = x1 + (x2 - x1) * ratio;
+                let y = y1 + (y2 - y1) * ratio;
+                tokio::time::sleep(Duration::from_millis(15)).await;
+                client
+                    .send_digitizer(
+                        (x, y),
+                        None,
+                        idevice::services::core_device::DigitizerEventType::Position,
+                        idevice::services::core_device::DigitizerEdge::None,
+                        target,
+                    )
+                    .await
+                    .map_err(map_device_error)?;
+            }
+            tokio::time::sleep(Duration::from_millis(15)).await;
+            client
+                .send_digitizer(
+                    (x2, y2),
+                    None,
+                    idevice::services::core_device::DigitizerEventType::End,
+                    idevice::services::core_device::DigitizerEdge::None,
+                    target,
+                )
+                .await
+                .map_err(map_device_error)?;
+            Ok(json!({
+                "action": "swipe",
+                "from": { "x": x1, "y": y1 },
+                "to": { "x": x2, "y": y2 },
+                "steps": steps,
+            }))
+        }
+        "button" => {
+            use idevice::services::core_device::ButtonState;
+            let usage_page = positional(2)? as u64;
+            let usage_code = positional(3)? as u64;
+            client
+                .send_button(usage_page, usage_code, ButtonState::Down)
+                .await
+                .map_err(map_device_error)?;
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            client
+                .send_button(usage_page, usage_code, ButtonState::Up)
+                .await
+                .map_err(map_device_error)?;
+            Ok(json!({ "action": "button", "usagePage": usage_page, "usageCode": usage_code }))
+        }
+        "key" => {
+            use idevice::services::core_device::ButtonState;
+            let usage_code = positional(2)? as u64;
+            client
+                .send_keyboard(usage_code, ButtonState::Down)
+                .await
+                .map_err(map_device_error)?;
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            client
+                .send_keyboard(usage_code, ButtonState::Up)
+                .await
+                .map_err(map_device_error)?;
+            Ok(json!({ "action": "key", "usageCode": usage_code }))
+        }
+        _ => Err(CoreError::InvalidArgument(format!(
+            "unknown hid action {action:?}; expected tap|swipe|button|key"
+        ))),
+    }
+}
+
+/// cryptexd 挂载路径（同步 go-ios `CryptexDeveloperDiskImageMounter.MountImage`）：/// `auto` 复用 personalized DDI 的本地选择规则定位 Restore 目录，`mount` 使用显式
+/// --path；BuildManifest 需含与设备 chip 匹配的 Cryptex1 identity。
+async fn command_image_cryptex(
+    tunnel: &dyn UserSpaceTunnel,
+    invocation: &CommandInvocation,
+    action: &str,
+    board_id: u64,
+    chip_id: u64,
+) -> CoreResult<Value> {
+    let ddi = if action == "auto" {
+        let base_dir = resolve_client_path(
+            invocation,
+            &option_value(&invocation.argv, "--basedir").unwrap_or_else(|| "./devimages".into()),
+        );
+        find_best_personalized_ddi(&base_dir, board_id, chip_id)?.ok_or_else(|| {
+            CoreError::InvalidArgument(format!(
+                "no compatible personalized Developer Disk Image under {}; expected ddi-*/Restore with a BuildIdentity for BoardId 0x{board_id:x} and ChipID 0x{chip_id:x}",
+                base_dir.display()
+            ))
+        })?
+    } else {
+        let raw_path = option_value(&invocation.argv, "--path")
+            .ok_or_else(|| CoreError::InvalidArgument("image mount requires --path".into()))?;
+        let restore_dir = resolve_client_path(invocation, &raw_path);
+        load_personalized_ddi(&restore_dir, board_id, chip_id)?
+    };
+    let build_manifest: plist::Value = plist::from_bytes(&ddi.build_manifest).map_err(|error| {
+        CoreError::InvalidArgument(format!(
+            "failed to parse BuildManifest of {}: {error}",
+            ddi.restore_dir.display()
+        ))
+    })?;
+    // 同步 go-ios `14f8098`（ensure mounted）：挂载前比对 cryptex_info 的
+    // identifier/version——同版本幂等返回；不同版本先卸载（uninstall 在
+    // mount_cryptex_ddi 失败时由调用方显式 image unmount 处理）。
+    let image_version = crate::cryptex::cryptex_image_version(&build_manifest, &ddi.restore_dir)?;
+    {
+        let mut client = crate::cryptex::connect_cryptex_client(tunnel).await?;
+        let installed = crate::cryptex::list_cryptexes(&mut client).await?;
+        if installed.contains(&image_version) {
+            return Ok(json!({
+                "status": "already-mounted",
+                "mode": "cryptex",
+                "source": action,
+                "buildVersion": ddi.build_version,
+                "restoreDirectory": ddi.restore_dir,
+                "image": ddi.image_path,
+                "trustCache": ddi.trust_cache_path,
+                "cryptexIdentifier": image_version.identifier,
+                "cryptexVersion": image_version.version,
+            }));
+        }
+    }
+    let installed =
+        crate::cryptex::mount_cryptex_ddi(tunnel, &build_manifest, &ddi.restore_dir).await?;
+    Ok(json!({
+        "status": "mounted",
+        "mode": "cryptex",
+        "source": action,
+        "buildVersion": ddi.build_version,
+        "restoreDirectory": ddi.restore_dir,
+        "image": ddi.image_path,
+        "trustCache": ddi.trust_cache_path,
+        "cryptexIdentifier": installed.identifier,
+        "cryptexVersion": installed.version,
+    }))
 }
 
 async fn lockdown_unsigned_value(
@@ -4883,6 +5521,10 @@ async fn command_mdm(
     }
 }
 
+/// 隧道路径 TCP 拨号上限,同步 go-ios `TunnelDialTimeout=15s`(`fda20a7`):设备挂死但
+/// TUN 接口与路由仍在时,裸拨号会吃满内核 SYN 超时(Linux 约 135 秒)。超时以
+/// `CoreError::Timeout` 上报,等价 go-ios `ErrDialTimeout` 哨兵的陈旧隧道判定语义。
+const TUNNEL_DIAL_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_WALLPAPER_IMAGE_BYTES: usize = 10 * 1024 * 1024;
 const MAX_SUPERVISION_IDENTITY_BYTES: usize = 4 * 1024 * 1024;
 
@@ -6684,7 +7326,7 @@ fn map_usbmuxd_error(error: idevice::IdeviceError) -> CoreError {
     CoreError::UsbmuxdUnavailable(error.to_string())
 }
 
-fn map_device_error(error: idevice::IdeviceError) -> CoreError {
+pub(crate) fn map_device_error(error: idevice::IdeviceError) -> CoreError {
     let message = error.to_string();
     // 设备锁定（passcode screen）时 Lockdown 返回 DeviceLocked/PasswordProtected；
     // 这是可恢复的明确状态，不是泛化设备不可用（go-ios v1.2.1 区分两者，
@@ -7053,6 +7695,85 @@ mod tests {
         );
         assert_eq!(config["procAttrs"].as_array().unwrap().len(), 2);
         assert_eq!(config["sysAttrs"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn sysmontap_attributes_frame_declares_names() {
+        let frame = sysmontap_attributes_frame(
+            &["pid".to_string(), "name".to_string()],
+            &["vmFree".to_string()],
+        )
+        .unwrap();
+        let value: Value = serde_json::from_slice(&frame).unwrap();
+        assert_eq!(value["v"], 1);
+        assert_eq!(value["type"], "attributes");
+        assert_eq!(value["procAttrs"], json!(["pid", "name"]));
+        assert_eq!(value["sysAttrs"], json!(["vmFree"]));
+    }
+
+    #[test]
+    fn sysmontap_v1_system_frame_aligns_values_by_name() {
+        let mut cpu_usage = plist::Dictionary::new();
+        cpu_usage.insert("CPUCount".into(), plist::Value::Integer(8.into()));
+        cpu_usage.insert("EnabledCPUs".into(), plist::Value::Integer(8.into()));
+        cpu_usage.insert("CPU_TotalLoad".into(), plist::Value::Real(0.42));
+        cpu_usage.insert("EndMachAbsTime".into(), plist::Value::Integer(123.into()));
+        let mut sample = plist::Dictionary::new();
+        sample.insert(
+            "System".into(),
+            plist::Value::Array(vec![
+                plist::Value::Integer(1.into()),
+                plist::Value::Integer(2.into()),
+            ]),
+        );
+        sample.insert("SystemCPUUsage".into(), plist::Value::Dictionary(cpu_usage));
+        let frame = sysmontap_v1_frame(&sample, &["pid".into(), "name".into()], &["vmFree".into()])
+            .unwrap()
+            .unwrap();
+        let value: Value = serde_json::from_slice(&frame).unwrap();
+        assert_eq!(value["type"], "system");
+        assert_eq!(value["cpuCount"], 8);
+        assert_eq!(value["enabledCpus"], 8);
+        assert_eq!(value["cpuTotalLoad"], 0.42);
+        assert_eq!(value["endMachAbsTime"], 123);
+        assert_eq!(value["systemAttributes"]["vmFree"], 1);
+    }
+
+    #[test]
+    fn sysmontap_v1_processes_frame_skips_name_slot() {
+        let mut processes = plist::Dictionary::new();
+        // 值数组不含 name 槽（上游以 map 键携带 name）。
+        processes.insert(
+            "SpringBoard".into(),
+            plist::Value::Array(vec![
+                plist::Value::Integer(42.into()),
+                plist::Value::Real(0.5),
+            ]),
+        );
+        let mut sample = plist::Dictionary::new();
+        sample.insert("Processes".into(), plist::Value::Dictionary(processes));
+        sample.insert("EndMachAbsTime".into(), plist::Value::Integer(77.into()));
+        let frame = sysmontap_v1_frame(
+            &sample,
+            &["pid".into(), "name".into(), "cpuUsage".into()],
+            &[],
+        )
+        .unwrap()
+        .unwrap();
+        let value: Value = serde_json::from_slice(&frame).unwrap();
+        assert_eq!(value["type"], "processes");
+        assert_eq!(value["endMachAbsTime"], 77);
+        // procAttrs 槽位 1 是 name（跳过）；values[0]→pid、values[1]→cpuUsage。
+        assert_eq!(value["processes"][0]["name"], "SpringBoard");
+        assert_eq!(value["processes"][0]["pid"], 42);
+        assert_eq!(value["processes"][0]["cpuUsage"], 0.5);
+        assert!(value["processes"][0].get("name_slot").is_none());
+    }
+
+    #[test]
+    fn sysmontap_v1_frame_skips_control_messages() {
+        let sample = plist::Dictionary::new();
+        assert!(sysmontap_v1_frame(&sample, &[], &[]).unwrap().is_none());
     }
 
     #[test]

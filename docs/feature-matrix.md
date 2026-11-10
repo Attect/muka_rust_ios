@@ -199,6 +199,62 @@ Apple 私有 CA "Apple Server Authentication CA"（不在 Windows/精简 Linux �
 与 go-ios 的差异：go-ios 同提交还在 `tss_tls_test.go` 里保留了线上拨测；本项目对应为 ignored
 测试。真机冷 DDI 挂载（`image auto --basedir`）回归待做。
 
+## 新增：go-ios 65bbc9f 同步（2026-11-10）
+
+参考基线推进到 `main-Attect-dev@65bbc9f`（合并上游 main 至 `6910f3b`，即 v1.3.0→v1.3.2 及
+后续约 76 个上游提交 + fork 自身 3172596/505b391 与合并修复）。按批次 A–D 落地：
+
+**A. 小而关键的修复**
+- already-mounted 幂等（65bbc9f）：`MountImage`/`UnmountImage` 拒绝响应解析进 vendor
+  （`RUST_IOS_PATCHES.md` 第 7 条），`ImageMountFailed` + detail 含 `already mounted`
+  （iOS 27.2 真机样本）视为挂载成功——个性化 DDI 驻留 `/System/Developer` 而 image
+  mounter 注册表脱节时这是镜像存在的唯一可靠信号。
+- 隧道拨号 15s 超时（fda20a7）：kernel route dial 与 userspace adapter connect 以
+  `CoreError::Timeout` 上报（等价 go-ios `ErrDialTimeout` 陈旧隧道语义）。
+- 数据面探针迟滞（fork 3172596 适配）：rust 隧道与设备枚举解耦无该 bug，但探针原实现
+  单次失败即 abort 全部连接重建；改为连续 `PROBE_FAILURES_BEFORE_REBUILD=3` 次失败才
+  重建，瞬时抖动告警并保留连接。
+- syslog BSD vis 转义解码（a5bbcbe/1cc5c28）：vendor `decode_vis`（patch 第 8 条），CJK
+  日志从 `\M-f\M^H\M^V` 形态恢复可读；控制值/未知/截断序列原样保留。
+
+**B. 协议加固与 iOS 27 握手**
+- vendor 加固包（patch 第 9 条）：XPC `body_len` 128 MiB 上限+溢出防护、partial 缓冲
+  上限、lockdown plist 长度上限、DVT 分片 128 MiB/1024 片上限、browse 1000 chunk/
+  1M 条目上限（de44995）。
+- RSD host announce 重构（6910f3b/51887da，patch 第 10 条）：`RsdHandshake::new` 先接收
+  解析设备握手再 announce 恰一次（回显 `MessagingProtocolVersion`/`RemoteXPCVersionFlags`
+  + 新 `BootSessionUUID`）；解析失败即未 announce，重试安全。iOS 27.2 每隧道仅接受一次
+  announce、大 data 回复仅对已 announce peer 可用。rust 结构本就是每隧道一次（握手缓存），
+  本同步修复了"固定值、先于设备握手、重试不安全"三个偏差。**iOS 27 真机回归待做**。
+
+**C. cryptexd 挂载体系（ca2c56d/14f8098/273d3e0）**
+- vendor 引用式文件流（patch 第 11 条）：`open_file_transfer`/`wait_file_transfer_accepted`/
+  `write_file_transfer_chunk`（FileOpen/FileOpenReply 握手 + 裸载荷 DATA 流）。
+- core `cryptex.rs`：BuildManifest Cryptex1 identity 匹配、`read-personalization-id`/
+  `get-nonce`（img4_nonce_t 56 字节布局）、SHA-384 摘要比对、`Cryptex1,Ticket` TSS 请求
+  （无 ApECID/ApChipID/ApBoardID，`Cryptex1,UDID` 16 字节）、五路引用式 install、
+  `copy-installed`/`uninstall`。`image mount/auto` 在隧道可用且 RSD 广告
+  `com.apple.security.cryptexd.remote` 时优先 cryptex 路径，personalized 兜底；
+  cryptex/personalized 两条路径都做 ensure-mounted 幂等检查（同版本直接返回）。
+  **新设备（iPhone 17+/iOS 27+）真机回归待做**。
+
+**D. 上位机消费能力**
+- `runtest/runxctest --junit-output`（aeda162/5e61501/d101593）：protocol `junit` 纯格式化器
+  从事件流聚合 JUnit XML；never-finished 用例输出 `<error>` 而非 `<skipped>`（CI 不把崩溃
+  跑成绿）；server 任务结束时写盘（含失败路径）。
+- sysmontap JSON v1 帧契约（fork 505b391）：首行 `attributes` 帧声明 procAttrs/sysAttrs，
+  随后 system/processes 帧按名对齐（procAttrs 槽位 1 为 name 槽）；替代原 raw 三段透传。
+- `screenshot --display=<unique-id>`（51887da）：CoreDevice `screencaptureservice` 多显示器
+  截图（需 server-owned tunnel）；不指定时保持 DVT 单屏路径。
+- `hid tap|swipe|button|key`（c584042，rust 扩展命令；go-ios 同为库能力无 CLI）：CoreDevice
+  `hid.indigo` 合成输入。认证门槛：设备仅在 displayservice 媒体流活跃时路由合成事件，
+  否则静默丢弃（与 go-ios 一致，结果带警告）。
+- `kill --watch <target>...`（5f16b28 WatchKill）：notifications 流任务命中目标进入
+  Running 时在同一 DVT 连接的 processControl 通道秒杀，事件行携带 `watchKill` 状态。
+- `display start`（7e82aa2 媒体流）暂为结构化 `NotImplemented`：媒体流需要内核隧道接口上
+  的 UDP 接收器与 server 任务管线，vendored `display_stream` 协议层已就绪；`display start`
+  属新批次工作。
+
 ## 已知协议限制
 
 - userspace tunnel 默认使用 USB `CoreDeviceProxy`；`--remote-pairing` 使用独立 RemotePairing

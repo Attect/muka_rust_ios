@@ -424,8 +424,8 @@ fn print_legacy_command_help(command: &str) {
             "List services advertised by the active server-owned tunnel.",
         ),
         "screenshot" => (
-            "ios screenshot [--output=<file>] [options]",
-            "Capture one screenshot.",
+            "ios screenshot [--output=<file>] [--display=<unique-id>] [options]",
+            "Capture one screenshot; --display targets a specific display via the CoreDevice screencapture service (requires a server-owned tunnel).",
         ),
         "set-icon-layout" => (
             "ios set-icon-layout <layoutFile> [options]",
@@ -1326,12 +1326,42 @@ fn stream_request(
             pid,
             process,
             os_trace,
+            watch_kill_targets: None,
         },
     })
 }
 
 fn nonempty_filter(value: Option<String>) -> Option<String> {
     value.filter(|value| !value.is_empty())
+}
+
+/// `kill --watch <target>...`（同步 go-ios `5f16b28` WatchKill）：server 持有的
+/// notifications 流任务在目标 app 进入 Running 状态时经同连接 processControl
+/// 秒杀；每个事件行携带 `watchKill` 状态。所有非 flag 位置参数都是目标
+/// （bundle id、可执行名或其叶子名）。
+fn watch_kill_request(arguments: &[String], udid: Option<String>) -> anyhow::Result<Request> {
+    let targets: Vec<String> = arguments
+        .iter()
+        .skip(1)
+        .filter(|value| !value.starts_with('-'))
+        .filter(|value| !value.trim().is_empty())
+        .cloned()
+        .collect();
+    if targets.is_empty() {
+        bail!("kill --watch requires at least one bundle ID or process name");
+    }
+    Ok(Request::StreamStart {
+        spec: StreamTaskSpec {
+            kind: TaskKind::Notifications,
+            udid,
+            output_path: None,
+            format: StreamFormat::JsonLines,
+            pid: None,
+            process: None,
+            os_trace: None,
+            watch_kill_targets: Some(targets),
+        },
+    })
 }
 
 fn os_trace_options(arguments: &OsTraceArgs) -> anyhow::Result<OsTraceOptions> {
@@ -1372,6 +1402,11 @@ fn external_stream_request(
     arguments: &[String],
     udid: Option<String>,
 ) -> anyhow::Result<Option<Request>> {
+    if arguments.first().map(String::as_str) == Some("kill")
+        && arguments.iter().any(|value| value == "--watch")
+    {
+        return watch_kill_request(arguments, udid).map(Some);
+    }
     if arguments.first().map(String::as_str) == Some("dproxy") {
         let value_options = [
             "--mode",
@@ -2056,6 +2091,7 @@ fn runtest_request(arguments: &[String], udid: Option<String>) -> anyhow::Result
             "--test-runner-bundle-id",
             "--xctest-config",
             "--log-output",
+            "--junit-output",
             "--test-to-run",
             "--test-to-skip",
             "--env",
@@ -2116,6 +2152,7 @@ fn runtest_request(arguments: &[String], udid: Option<String>) -> anyhow::Result
                 is_ui_test,
             }],
             output_path: xctest_output_path(arguments)?,
+            junit_output_path: junit_output_path(arguments)?,
             source_xctestrun_path: None,
             timeout_ms: None,
         },
@@ -2123,7 +2160,11 @@ fn runtest_request(arguments: &[String], udid: Option<String>) -> anyhow::Result
 }
 
 fn runxctest_request(arguments: &[String], udid: Option<String>) -> anyhow::Result<Request> {
-    validate_external_options(arguments, &["--xctestrun-file-path", "--log-output"], &[])?;
+    validate_external_options(
+        arguments,
+        &["--xctestrun-file-path", "--log-output", "--junit-output"],
+        &[],
+    )?;
     let source = external_option_value(arguments, "--xctestrun-file-path")
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| anyhow!("runxctest requires --xctestrun-file-path"))?;
@@ -2134,10 +2175,30 @@ fn runxctest_request(arguments: &[String], udid: Option<String>) -> anyhow::Resu
             udid,
             targets,
             output_path: xctest_output_path(arguments)?,
+            junit_output_path: junit_output_path(arguments)?,
             source_xctestrun_path: Some(source.to_string_lossy().into_owned()),
             timeout_ms: None,
         },
     })
+}
+
+/// `--junit-output`（同步 go-ios `runtest --junit-output`，aeda162）：server 在
+/// 运行结束时把聚合结果写成 JUnit XML；`-` 与空值视为未配置。
+fn junit_output_path(arguments: &[String]) -> anyhow::Result<Option<String>> {
+    let Some(path) = external_option_value(arguments, "--junit-output") else {
+        return Ok(None);
+    };
+    if path.is_empty() {
+        bail!("--junit-output cannot be empty");
+    }
+    if path == "-" {
+        return Ok(None);
+    }
+    Ok(Some(
+        resolve_client_path(PathBuf::from(path))?
+            .to_string_lossy()
+            .into_owned(),
+    ))
 }
 
 fn xctest_output_path(arguments: &[String]) -> anyhow::Result<Option<String>> {
@@ -3251,6 +3312,35 @@ mod tests {
     }
 
     #[test]
+    fn kill_watch_builds_notifications_watch_kill_request() {
+        // 同步 go-ios `5f16b28`：kill --watch 目标由通知流任务秒杀。
+        let Request::StreamStart { spec } = external_stream_request(
+            &[
+                "kill".into(),
+                "--watch".into(),
+                "com.example.Settings".into(),
+                "Phone".into(),
+            ],
+            Some("phone".into()),
+        )
+        .unwrap()
+        .unwrap() else {
+            panic!("stream start expected");
+        };
+        assert_eq!(spec.kind, TaskKind::Notifications);
+        assert_eq!(spec.format, StreamFormat::JsonLines);
+        assert_eq!(spec.udid.as_deref(), Some("phone"));
+        assert_eq!(
+            spec.watch_kill_targets,
+            Some(vec!["com.example.Settings".into(), "Phone".into()])
+        );
+        assert!(
+            external_stream_request(&["kill".into(), "--watch".into()], None).is_err(),
+            "kill --watch without targets must fail with a structured error"
+        );
+    }
+
+    #[test]
     fn runtest_builds_finite_xctest_task_request() {
         let Request::XCTestStart { spec } = external_stream_request(
             &[
@@ -3264,6 +3354,7 @@ mod tests {
                 "DemoUITests/testTwo".into(),
                 "--env=FEATURE=true".into(),
                 "--log-output=xctest-events.jsonl".into(),
+                "--junit-output=xctest-junit.xml".into(),
             ],
             Some("phone".into()),
         )
@@ -3290,6 +3381,8 @@ mod tests {
         );
         assert!(spec.targets[0].is_ui_test);
         assert!(PathBuf::from(spec.output_path.as_ref().unwrap()).is_absolute());
+        // --junit-output（同步 go-ios aeda162）按 client 相对路径转绝对路径。
+        assert!(PathBuf::from(spec.junit_output_path.as_ref().unwrap()).is_absolute());
         assert_eq!(
             required_server_capability(&Request::XCTestStart { spec: spec.clone() }),
             Some("xctest_unit_filters")
