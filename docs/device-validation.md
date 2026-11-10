@@ -38,6 +38,21 @@ personalized（go-ios `NewImageMounter` 顺序试语义）、WatchKill 目标解
 
 修复记录：`stream_kind_uses_dvt` 补 `DisplayStream`（重试 24 次不恢复的真机现象定位到此）；探针握手曾误写 2 字节端口（协议为 4 字节 LE），已修。
 
+### 2026-11-10（续 2）Xcode WDA 触发 cryptex 安装的观察与卸载路径验证
+
+设备插到 开发用 Mac，Xcode 运行一次 WDA（iOS 27.2.1 build 24B156），随后在 Mac 上以
+fork CLI（`/tmp/ios-fork`，源码取自本项目 GolandPlatforms 工作副本，Go 1.26.5 编译）观察：
+
+| 检查 | 实际结果 | 结论 |
+|---|---|---|
+| Mac 主机侧文件 | `iOS_DDI.dmg` 未更新（仍 15E204a）；全盘无 `022-22107`/`*.cryptex_info`/`9275` 相关文件；仅新增设备符号目录 `测试 iPhone 27.2.1 (24B156)` | **iOS 27.x DDI cryptex 不落主机文件**——CryptexKitHost 直接构建设备端，"从 Mac 拷贝补全本地 DDI"路线不可行 |
+| 设备端 cryptex 状态（fork `image list`） | 出现 `com.apple.MobileAsset.DDI@27.1.9275.0`（hex 签名行），旧 personalized 27A5194q 挂载已被 Xcode 替换 | Xcode WDA 运行确实经 cryptexd 安装了 DDI cryptex |
+| cryptex 卸载路径（fork `image unmount`） | `uninstalled developer disk image cryptex ... 27.1.9275.0` → `unmounted ... mounter=cryptex` → 卸载后列表无 MobileAsset 条目 | passed（与 rust `cryptex.rs` 的 copy-installed 过滤 + uninstall wire 语义一致；卸载可逆——下次 Xcode 运行自动重装） |
+
+对 rust 实现的影响：`image list` 合并 cryptex 条目、`image unmount` 走 cryptex uninstall
+的设备端行为均与 fork 观察一致；cryptex install 的 TSS 资格验证仍依赖 Apple 侧资产
+（cryptex 版本不落主机文件，无法离线补齐）。
+
 ### 2026-09-08 go-ios ec90af1 同步（TSS HTTPS + 叶子 sanity check，真机回归待做）
 
 同步 go-ios `main-Attect-dev@ec90af1`：TSS 请求由明文 `http://gs.apple.com` 改为
