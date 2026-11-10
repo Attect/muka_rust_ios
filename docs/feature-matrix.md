@@ -1,6 +1,6 @@
 # go-ios 功能迁移矩阵
 
-参考基线：`C:\Users/<user>\GolandProjects\go-ios`，分支 `main-Attect-dev`，提交 `5804fa9`。
+参考基线：`C:/Users/<user>\GolandProjects\go-ios`，分支 `main-Attect-dev`，提交 `5804fa9`。
 矩阵按命令和 flag 的实际行为记录，不以“能编译”代替协议验证。
 
 状态：

@@ -14,3 +14,11 @@
 
 Cargo gate 串行运行：format、check、clippy `-D warnings`、test、release build。
 进程测试必须隔离 `RUST_IOS_HOME` 和 server port，不能操作用户实例。
+
+## 文档脱敏
+
+文档（docs/、README、交接说明）禁止提及开发环境的设备与主机信息，包括但不限于：
+UDID、序列号、USB instance id、设备型号/板号、设备名、设备与主机的内网 IP/主机名、
+本机用户名路径。统一使用占位符（如 `<udid>`、`<user>`）或通用描述（如
+「测试 iPhone / iOS 26.5.2」、「开发用 Mac」）。Apple 公开 OS build 标签（如 23F84）
+作为资产/版本矩阵可保留。新增真机记录时即脱敏，不事后补。

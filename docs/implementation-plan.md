@@ -37,7 +37,7 @@
 
 ### P0：参考实现审计与范围冻结
 
-- 从 `C:\Users/<user>\GolandProjects\go-ios` 提取完整 Usage、顶层命令、复合命令和协议包。
+- 从 `C:/Users/<user>\GolandProjects\go-ios` 提取完整 Usage、顶层命令、复合命令和协议包。
 - 记录原 tunnel agent HTTP API、forward 阻塞模型和所有额外长期服务。
 - 建立功能迁移矩阵，状态只能是：`implemented`、`offline-tested`、`device-test-needed`、
   `planned`、`intentionally-changed`。

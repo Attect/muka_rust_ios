@@ -130,7 +130,7 @@ batterycheck、diskspace、`fsync tree`、ip、`devicestate list`、devmode get�
 $env:RUST_IOS_BACKEND = 'replay'
 $env:RUST_IOS_REPLAY_FILE = (Resolve-Path tests/fixtures/replay-basic.json)
 target\debug\ios.exe info --udid replay-phone `
-  --server-home C:\Users/<user>\RustroverProjects\rust_ios\target\process-tests\replay-basic `
+  --server-home C:/Users/<user>\RustroverProjects\rust_ios\target\process-tests\replay-basic `
   --server-addr 127.0.0.1:60201
 ```
 
@@ -195,9 +195,9 @@ protocol 1.19 的 dproxy 单元/集成测试使用 loopback fake usbmuxd upstrea
 release 双进程 smoke：
 
 ```powershell
-node C:\Users/<user>\RustroverProjects\rust_ios\scripts\smoke-dproxy.mjs `
-  C:\Users/<user>\RustroverProjects\rust_ios\target\release\ios.exe `
-  C:\Users/<user>\RustroverProjects\rust_ios\target\process-tests\dproxy-protocol-119-final-4 `
+node C:/Users/<user>\RustroverProjects\rust_ios\scripts\smoke-dproxy.mjs `
+  C:/Users/<user>\RustroverProjects\rust_ios\target\release\ios.exe `
+  C:/Users/<user>\RustroverProjects\rust_ios\target\process-tests\dproxy-protocol-119-final-4 `
   60247
 ```
 
@@ -215,9 +215,9 @@ protocol 1.20 的专项脚本要求调用方传入不存在的绝对 evidence �
 也不删除成功或失败 evidence：
 
 ```powershell
-node C:\Users/<user>\RustroverProjects\rust_ios\scripts\smoke-shared-xctest.mjs `
-  C:\Users/<user>\RustroverProjects\rust_ios\target\debug\ios.exe `
-  C:\Users/<user>\RustroverProjects\rust_ios\target\process-tests\shared-xctest-protocol-120-smoke-2
+node C:/Users/<user>\RustroverProjects\rust_ios\scripts\smoke-shared-xctest.mjs `
+  C:/Users/<user>\RustroverProjects\rust_ios\target\debug\ios.exe `
+  C:/Users/<user>\RustroverProjects\rust_ios\target\process-tests\shared-xctest-protocol-120-smoke-2
 ```
 
 脚本先建立 mock userspace tunnel，再串行验证 WDA、UI runner 和 finite XCTest，避免同设备 XCTest

@@ -40,7 +40,7 @@ personalized（go-ios `NewImageMounter` 顺序试语义）、WatchKill 目标解
 
 ### 2026-11-10（续 2）Xcode WDA 触发 cryptex 安装的观察与卸载路径验证
 
-设备插到 开发用 Mac，Xcode 运行一次 WDA（iOS 27.2.1 build 24B156），随后在 Mac 上以
+设备插到开发用 Mac，Xcode 运行一次 WDA（iOS 27.2.1 build 24B156），随后在 Mac 上以
 fork CLI（`/tmp/ios-fork`，源码取自本项目 GolandPlatforms 工作副本，Go 1.26.5 编译）观察：
 
 | 检查 | 实际结果 | 结论 |
@@ -249,7 +249,7 @@ pass/fail/skip case 的普通 XCUITest bundle。unit XCTest 与 filters 在依�
 ## iOS 26 FileService 与重启后综合回归记录
 
 2026-07-17 使用同一脱敏设备、Windows x64/USB、独立 server home 和动态端口。go-ios 对照使用本地
-`main-Attect-dev@5804fa9` 临时 build；旧的 `C:\Users/<user>\bin\ios.exe` 会固定选择不兼容的
+`main-Attect-dev@5804fa9` 临时 build；旧的 `C:/Users/<user>\bin\ios.exe` 会固定选择不兼容的
 `ddi-17E5179g` 并得到 Apple TSS status 94，因此不作为修正后基线。两边均从
 `D:\iOSDeviceSupport\iOSDeviceSupport` 选择 `ddi-17F113`。用户结束先前 go-ios 后，设备仍可枚举，
 没有 tunnel/listener 残留；仓库根目录遗留的 `selfIdentity.plist` 已删除并加入 ignore。
@@ -560,7 +560,7 @@ CoreDeviceProxy 的反向证据。
 iTunes 再次重启后，参考 go-ios 进程已经退出；AppleMobileDeviceProcess 恢复，原隔离 rust-ios server
 仍监听 `127.0.0.1:49323`，显式指定绝对 `--server-home` 与该非默认 port 后重新发现同一 USB 设备。
 证据保留在
-`C:\Users/<user>\RustroverProjects\rust_ios\target\process-tests\device-readonly-core-protocol-120-1`。
+`C:/Users/<user>\RustroverProjects\rust_ios\target\process-tests\device-readonly-core-protocol-120-1`。
 
 | 检查 | 实际结果 | 结论 |
 |---|---|---|
@@ -583,7 +583,7 @@ iTunes 再次重启后，参考 go-ios 进程已经退出；AppleMobileDevicePro
 ### 2026-07-18 Protocol 1.20 扩展只读与 Diagnostics 对照
 
 使用新的绝对隔离目录
-`C:\Users/<user>\RustroverProjects\rust_ios\target\process-tests\device-readonly-extended-protocol-120-1`
+`C:/Users/<user>\RustroverProjects\rust_ios\target\process-tests\device-readonly-extended-protocol-120-1`
 和 IPC `127.0.0.1:49324`。本阶段没有挂载 DDI、没有创建持续 task，也不输出 wallpaper、icon layout、
 AFC 文件名、网络地址或设备 serial。
 
@@ -606,8 +606,8 @@ AFC 文件名、网络地址或设备 serial。
 ### 2026-07-18 Protocol 1.20 可逆写操作与 reboot 后 tunnel 自愈
 
 本阶段使用完全测试用 `测试 iPhone / iOS 26.5.2` USB 设备、隔离目录
-`C:\Users/<user>\AppData\Local\Temp\rust-ios-codex-write-audit` 和 IPC `127.0.0.1:62106`。安装测试使用
-`C:\Users/<user>\ClionProjects\WebDriverAgent\build\Debug-iphoneos\WebDriverAgentRunner-Runner.app` 的
+`C:/Users/<user>\AppData\Local\Temp\rust-ios-codex-write-audit` 和 IPC `127.0.0.1:62106`。安装测试使用
+`C:/Users/<user>\ClionProjects\WebDriverAgent\build\Debug-iphoneos\WebDriverAgentRunner-Runner.app` 的
 签名产物；WebDriverAgent 项目的远程 macOS 构建主机可达且为 Xcode 26.6。本节不记录完整 UDID、设备
 serial、文件内容、Wi-Fi credential 或 P12/private key。
 
@@ -818,7 +818,7 @@ server 单测新增双向互斥用例（8/8 通过）。
 ### 2026-08-13 runtest 完整 completion 与 WDA 测试资产构建
 
 使用本仓库 release `ios.exe`、隔离 home 与动态 IPC port；设备为文档同一台
-`测试 iPhone / iOS 26.5.2 / 23F84`。WDA 项目（`C:\Users/<user>\ClionProjects\WebDriverAgent`）
+`测试 iPhone / iOS 26.5.2 / 23F84`。WDA 项目（`C:/Users/<user>\ClionProjects\WebDriverAgent`）
 经远程 macOS 构建主机（开发用 Mac 构建主机，Xcode 26.6）构建测试资产。
 
 **WDA 项目构建修复**（本机源码，已同步远程）：
