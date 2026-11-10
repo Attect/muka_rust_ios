@@ -183,6 +183,9 @@ pub enum Request {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+// Task 变体携带 TaskRecord（含 TaskSpec），规格字段增长会放大变体尺寸差；
+// 该枚举只经 IPC 序列化传输，栈上尺寸差无害（serde 按字段编码，不拷贝整体）。
+#[allow(clippy::large_enum_variant)]
 pub enum ResponsePayload {
     Pong { server_time_ms: u64 },
     Ack { message: String },
@@ -318,6 +321,8 @@ pub enum TaskKind {
     Pcap,
     Notifications,
     Sysmontap,
+    /// CoreDevice display 媒体流（同步 go-ios `7e82aa2`；仅内核隧道，UDP 接收）。
+    DisplayStream,
     AccessibilityInspector,
     LocationSimulation,
     DeviceState,
@@ -345,6 +350,7 @@ impl TaskKind {
             Self::Pcap => "pcap",
             Self::Notifications => "notifications",
             Self::Sysmontap => "sysmontap",
+            Self::DisplayStream => "display_stream",
             Self::AccessibilityInspector => "accessibility_inspector",
             Self::LocationSimulation => "location_simulation",
             Self::DeviceState => "device_state",
@@ -548,6 +554,12 @@ pub struct StreamTaskSpec {
     /// 进入 Running 状态时，在同一条 DVT 连接的 processControl 通道上秒杀。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub watch_kill_targets: Option<Vec<String>>,
+    /// display 媒体流要镜像的显示器 ID（同步 go-ios `7e82aa2`；None = 主屏）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_id: Option<i64>,
+    /// display 媒体流的宿主 UDP 接收端口（内核隧道接口上）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receiver_port: Option<u16>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -1183,6 +1195,8 @@ mod tests {
                 follow: true,
             }),
             watch_kill_targets: None,
+            display_id: None,
+            receiver_port: None,
         });
         let encoded = serde_json::to_value(spec).unwrap();
         assert_eq!(encoded["configuration"]["os_trace"]["levels"][0], "error");
@@ -1228,6 +1242,8 @@ mod tests {
             process: None,
             os_trace: None,
             watch_kill_targets: None,
+            display_id: None,
+            receiver_port: None,
         });
         assert_eq!(stream.kind(), TaskKind::Syslog);
 

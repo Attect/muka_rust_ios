@@ -1327,8 +1327,74 @@ fn stream_request(
             process,
             os_trace,
             watch_kill_targets: None,
+            display_id: None,
+            receiver_port: None,
         },
     })
+}
+
+/// `display start`（同步 go-ios `7e82aa2`，rust 扩展命令）：server 持有的
+/// display 媒体流任务——displayservice `startmediastream`（video，DisplayByID）
+/// + 内核隧道接口上的 UDP 接收器泵原始 RTP 帧到 output。
+///
+/// 停止：`task stop`（close 时向设备发 stopAll）。
+/// 限制：仅内核隧道可用（userspace 无 UDP）。
+fn display_stream_start_request(
+    arguments: &[String],
+    udid: Option<String>,
+) -> anyhow::Result<Request> {
+    // 子命令字面量 `display start` 不参与 flag 校验。
+    validate_external_options(
+        &arguments[2..],
+        &[
+            "--display-id",
+            "--receiver-port",
+            "--output",
+            "--log-output",
+        ],
+        &[],
+    )?;
+    let display_id = external_option_value(arguments, "--display-id")
+        .map(|value| value.parse::<i64>())
+        .transpose()
+        .map_err(|_| anyhow!("--display-id must be a display id"))?;
+    let receiver_port = match external_option_value(arguments, "--receiver-port") {
+        Some(value) => Some(
+            value
+                .parse::<u16>()
+                .map_err(|_| anyhow!("--receiver-port must be 0..65535"))?,
+        ),
+        None => Some(49_152),
+    };
+    let output_path = external_option_value(arguments, "--output")
+        .or_else(|| external_option_value(arguments, "--log-output"))
+        .map(resolve_display_output)
+        .transpose()?;
+    Ok(Request::StreamStart {
+        spec: StreamTaskSpec {
+            kind: TaskKind::DisplayStream,
+            udid,
+            output_path,
+            format: StreamFormat::Raw,
+            pid: None,
+            process: None,
+            os_trace: None,
+            watch_kill_targets: None,
+            display_id,
+            receiver_port,
+        },
+    })
+}
+
+/// 相对 output 路径按当前目录转绝对（server 代写 client 绝对路径约定）。
+fn resolve_display_output(value: String) -> anyhow::Result<String> {
+    let path = PathBuf::from(value);
+    let path = if path.is_absolute() {
+        path
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    Ok(path.to_string_lossy().into_owned())
 }
 
 fn nonempty_filter(value: Option<String>) -> Option<String> {
@@ -1360,6 +1426,8 @@ fn watch_kill_request(arguments: &[String], udid: Option<String>) -> anyhow::Res
             process: None,
             os_trace: None,
             watch_kill_targets: Some(targets),
+            display_id: None,
+            receiver_port: None,
         },
     })
 }
@@ -1406,6 +1474,11 @@ fn external_stream_request(
         && arguments.iter().any(|value| value == "--watch")
     {
         return watch_kill_request(arguments, udid).map(Some);
+    }
+    if arguments.first().map(String::as_str) == Some("display")
+        && arguments.get(1).map(String::as_str) == Some("start")
+    {
+        return display_stream_start_request(arguments, udid).map(Some);
     }
     if arguments.first().map(String::as_str) == Some("dproxy") {
         let value_options = [

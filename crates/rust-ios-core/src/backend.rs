@@ -67,6 +67,8 @@ pub enum RsdServiceKind {
     ScreenCapture,
     /// CoreDevice `hid.indigo`（同步 go-ios `c584042` 合成触摸/按键输入）。
     Hid,
+    /// CoreDevice `displayservice`（同步 go-ios `7e82aa2` display 媒体流）。
+    DisplayService,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -92,6 +94,7 @@ impl RsdServiceKind {
             Self::Pasteboard => "com.apple.coredevice.pasteboardservice",
             Self::ScreenCapture => "com.apple.coredevice.screencaptureservice",
             Self::Hid => "com.apple.coredevice.hid.indigo",
+            Self::DisplayService => "com.apple.coredevice.displayservice",
         }
     }
 }

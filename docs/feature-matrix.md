@@ -251,9 +251,20 @@ Apple 私有 CA "Apple Server Authentication CA"（不在 Windows/精简 Linux �
   否则静默丢弃（与 go-ios 一致，结果带警告）。
 - `kill --watch <target>...`（5f16b28 WatchKill）：notifications 流任务命中目标进入
   Running 时在同一 DVT 连接的 processControl 通道秒杀，事件行携带 `watchKill` 状态。
-- `display start`（7e82aa2 媒体流）暂为结构化 `NotImplemented`：媒体流需要内核隧道接口上
-  的 UDP 接收器与 server 任务管线，vendored `display_stream` 协议层已就绪；`display start`
-  属新批次工作。
+- `display start [--display-id=N] [--receiver-port=P]`（7e82aa2，rust 扩展命令）：server
+  任务 displayservice `startmediastream`（video/DisplayByID，offer 为 vendored
+  `MediaNegotiationBlob::video_offer` zlib protobuf）+ 内核隧道接口 UDP 接收器泵原始
+  RTP；userspace tunnel 上返回结构化 `unsupported_platform`（go-ios 同款
+  `ErrUserspaceTunnelUnsupported` 语义）；停止 `task stop`（close 发 stopAll）。
+  **内核隧道实时流需管理员环境，待提权验证。**
+- **二次 announce 复现**（6910f3b 保护验证）：`examples/announce_probe.rs` 探针在
+  iOS 27.2.1 真机复现 go-ios 描述的迁移行为——第二次 announce 发送成功后设备断开
+  连接、旧服务端口失效，`tunnel refresh` 重建恢复；rust announce-once 保护（每隧道
+  恰一次）由此反向验证。
+- cryptex install 全链路真机推进：17F113 完整 cryptex 布局（ssh 开发用 Mac 获取，SHA-256
+  校验）执行至 **TSS `Cryptex1,Ticket` 请求到达 Apple**（identity 匹配 0xFF10、摘要、
+  nonce 全部通过）——Apple 按版本资格拒绝（STATUS=94，旧 cryptex 对新 OS 不 eligible），
+  回退 personalized 成功挂载。27A5194q 世代 cryptex 资产需 Xcode 资产管线获取。
 
 ## 已知协议限制
 

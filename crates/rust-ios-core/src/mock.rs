@@ -520,6 +520,11 @@ impl DeviceBackend for MockDeviceBackend {
                 initial_bytes: Vec::new(),
                 service_transport: mock_service_transport(&spec.kind, tunnel.as_ref()),
             },
+            TaskKind::DisplayStream if spec.format == StreamFormat::Raw => DeviceStreamInfo {
+                content_type: "application/octet-stream".into(),
+                initial_bytes: Vec::new(),
+                service_transport: mock_service_transport(&spec.kind, tunnel.as_ref()),
+            },
             TaskKind::Pcap => {
                 return Err(CoreError::InvalidArgument(
                     "pcap stream requires pcap format".into(),
@@ -2440,6 +2445,24 @@ impl DeviceStream for MockDeviceStream {
                 TaskKind::ScreenshotStream => {
                     return Ok(vec![0xff, 0xd8, 0xff, 0xe0, 0x00, 0x02, 0xff, 0xd9]);
                 }
+                // display 媒体流 mock：确定性 12 字节 RTP 形态帧（V=2, PT=123 HEVC）。
+                TaskKind::DisplayStream => {
+                    let sequence = self.sequence;
+                    return Ok(vec![
+                        0x80,
+                        123,
+                        0x00,
+                        0x01,
+                        (sequence >> 24) as u8,
+                        (sequence >> 16) as u8,
+                        (sequence >> 8) as u8,
+                        sequence as u8,
+                        0xde,
+                        0xad,
+                        0xbe,
+                        (sequence & 0xff) as u8,
+                    ]);
+                }
                 _ => return Err(CoreError::NotImplemented("mock stream kind".into())),
             }
         }
@@ -3280,6 +3303,8 @@ mod tests {
                     process: None,
                     os_trace: None,
                     watch_kill_targets: None,
+                    display_id: None,
+                    receiver_port: None,
                 },
                 None,
             )
@@ -3300,6 +3325,8 @@ mod tests {
                     process: None,
                     os_trace: None,
                     watch_kill_targets: None,
+                    display_id: None,
+                    receiver_port: None,
                 },
                 None,
             )
@@ -3325,6 +3352,8 @@ mod tests {
                         follow: true,
                     }),
                     watch_kill_targets: None,
+                    display_id: None,
+                    receiver_port: None,
                 },
                 None,
             )
@@ -3352,6 +3381,8 @@ mod tests {
                         process: None,
                         os_trace: None,
                         watch_kill_targets: None,
+                        display_id: None,
+                        receiver_port: None,
                     },
                     None,
                 )
@@ -3372,11 +3403,39 @@ mod tests {
                     process: Some("App".into()),
                     os_trace: None,
                     watch_kill_targets: None,
+                    display_id: None,
+                    receiver_port: None,
                 },
                 None,
             )
             .await
             .unwrap();
+        let pcap_bytes = pcap.next_chunk().await.unwrap();
+        assert!(pcap_bytes.len() > 16);
+
+        // display 媒体流 mock：RTP 形态原始帧（V=2、PT=123 HEVC）。
+        let mut display = backend
+            .start_stream(
+                &StreamTaskSpec {
+                    kind: TaskKind::DisplayStream,
+                    udid: Some("mock-1".into()),
+                    output_path: None,
+                    format: StreamFormat::Raw,
+                    pid: None,
+                    process: None,
+                    os_trace: None,
+                    watch_kill_targets: None,
+                    display_id: Some(1),
+                    receiver_port: Some(49_200),
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(display.info().content_type, "application/octet-stream");
+        let frame = display.next_chunk().await.unwrap();
+        assert_eq!(frame[0] & 0xC0, 0x80, "RTP version 2");
+        assert_eq!(frame[1], 123, "HEVC payload type from the offer");
         assert_eq!(pcap.info().initial_bytes.len(), 24);
         assert_eq!(&pcap.info().initial_bytes[..4], &[0xd4, 0xc3, 0xb2, 0xa1]);
         assert!(pcap.next_chunk().await.unwrap().len() > 16);

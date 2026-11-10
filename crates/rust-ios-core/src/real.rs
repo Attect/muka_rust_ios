@@ -411,6 +411,14 @@ impl DeviceBackend for IdeviceBackend {
                 }
                 start_sysmontap_stream(provider, tunnel).await
             }
+            TaskKind::DisplayStream => {
+                if spec.format != StreamFormat::Raw {
+                    return Err(CoreError::InvalidArgument(
+                        "display stream requires raw frame format".into(),
+                    ));
+                }
+                start_display_stream(provider, tunnel, spec.display_id, spec.receiver_port).await
+            }
             kind => Err(CoreError::NotImplemented(format!(
                 "stream kind {kind:?} has not been migrated"
             ))),
@@ -2829,6 +2837,129 @@ async fn kill_via_process_control(remote: &mut DvtClient, pid: u32) -> CoreResul
         .kill_app(u64::from(pid))
         .await
         .map_err(map_device_error)
+}
+
+/// CoreDevice display 媒体流（同步 go-ios `7e82aa2`）：displayservice
+/// `startmediastream`（video，DisplayByID 模式）+ 宿主 UDP 接收器泵原始 RTP。
+///
+/// UDP 接收器必须绑定内核隧道接口地址（go-ios：userspace transport 只有 TCP，
+/// `ErrUserspaceTunnelUnsupported`）；绑不上即以结构化错误退出。设备端协商偏离
+/// offer 时会报不透明的 "Invalid Parameter"（offer 为逐字节钉死的 zlib
+/// protobuf，与 Xcode 抓包对齐）。
+async fn start_display_stream(
+    _provider: UsbmuxdProvider,
+    tunnel: Option<Arc<dyn UserSpaceTunnel>>,
+    display_id: Option<i64>,
+    receiver_port: Option<u16>,
+) -> CoreResult<Box<dyn DeviceStream>> {
+    let Some(tunnel) = tunnel else {
+        return Err(CoreError::DeviceUnavailable(
+            "display stream requires a running server-owned tunnel; the kernel tunnel is required because the userspace transport has no UDP"
+                .into(),
+        ));
+    };
+    let receiver_port = receiver_port.unwrap_or(49152);
+    let info = tunnel.info().clone();
+    let receiver = tokio::net::UdpSocket::bind((info.client_address.as_str(), receiver_port))
+        .await
+        .map_err(|error| {
+            CoreError::UnsupportedPlatform(format!(
+                "display stream needs a kernel tunnel interface to bind UDP on [{}]:{receiver_port}; userspace tunnels have no UDP (start the tunnel without --userspace, administrator required): {error}",
+                info.client_address
+            ))
+        })?;
+    // go-ios 把接收缓冲设为 1 MiB（不足会因丢包触发设备降码率）；tokio UdpSocket
+    // 未暴露 SO_RCVBUF，保持 OS 默认值，丢包由设备侧协商自适应。
+
+    let io = tunnel
+        .connect_rsd_service(RsdServiceKind::DisplayService)
+        .await?;
+    let socket: Box<dyn idevice::ReadWrite> = Box::new(IdeviceSharedRsdSocket(io));
+    let mut client = idevice::services::core_device::DisplayServiceClient::from_stream(socket)
+        .await
+        .map_err(map_device_error)?;
+    let session_id = uuid::Uuid::new_v4();
+    let ssrc = session_id.as_u128() as u32;
+    let offer =
+        idevice::services::core_device::display_stream::MediaNegotiationBlob::video_offer(ssrc)
+            .to_negotiator_offer()
+            .map_err(map_device_error)?;
+    let params = idevice::services::core_device::display_stream::build_start_video_parameters(
+        &info.client_address,
+        receiver.local_addr()?.port(),
+        &info.server_address,
+        0,
+        offer,
+        140,
+        display_id.unwrap_or(1),
+        session_id,
+    );
+    client
+        .start_media_stream(params)
+        .await
+        .map_err(map_device_error)?;
+
+    let service_transport = dvt_service_transport(Some(&tunnel));
+    let (sender, receiver_mpsc) = mpsc::channel(2);
+    let (ready_sender, ready_receiver) = oneshot::channel();
+    let cancel = CancellationToken::new();
+    let worker_cancel = cancel.clone();
+    let join = tokio::spawn(async move {
+        if ready_sender.send(Ok(())).is_err() {
+            return;
+        }
+        let mut buffer = vec![0_u8; 64 * 1024];
+        loop {
+            tokio::select! {
+                () = worker_cancel.cancelled() => {
+                    // 设备常在 stop 中途断连：stopAll 失败不视为错误。
+                    let _ = tokio::time::timeout(Duration::from_secs(2), async {
+                        let io = tunnel.connect_rsd_service(RsdServiceKind::DisplayService).await?;
+                        let socket: Box<dyn idevice::ReadWrite> =
+                            Box::new(IdeviceSharedRsdSocket(io));
+                        let mut client = idevice::services::core_device::DisplayServiceClient::from_stream(socket)
+                            .await
+                            .map_err(map_device_error)?;
+                        let _ = client.stop_media_stream().await;
+                        Ok::<(), CoreError>(())
+                    }).await;
+                    return;
+                }
+                received = receiver.recv_from(&mut buffer) => {
+                    let result = match received {
+                        Ok((size, _peer)) => Ok(buffer[..size].to_vec()),
+                        Err(error) => Err(CoreError::Io(error)),
+                    };
+                    let failed = result.is_err();
+                    if sender.send(result).await.is_err() || failed {
+                        return;
+                    }
+                }
+            }
+        }
+    });
+    match ready_receiver.await {
+        Ok(Ok(())) => Ok(Box::new(IdeviceDvtWorkerStream {
+            receiver: receiver_mpsc,
+            cancel,
+            join: Some(join),
+            info: DeviceStreamInfo {
+                content_type: "application/octet-stream".into(),
+                initial_bytes: Vec::new(),
+                service_transport,
+            },
+        })),
+        Ok(Err(error)) => {
+            let _ = join.await;
+            Err(error)
+        }
+        Err(_) => {
+            let _ = join.await;
+            Err(CoreError::Backend(
+                "display stream worker exited during setup".into(),
+            ))
+        }
+    }
 }
 
 async fn sysmontap_attributes(remote: &mut DvtClient) -> CoreResult<(Vec<String>, Vec<String>)> {

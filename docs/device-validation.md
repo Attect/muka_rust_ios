@@ -23,9 +23,20 @@ userspace endpoint；对照 go-ios 提交信息中的复现条件。
 验证中修复的三个缺陷（见提交 2）：共享 RSD 白名单补 `image`/`hid`、cryptex 失败回退
 personalized（go-ios `NewImageMounter` 顺序试语义）、WatchKill 目标解析与路径形态匹配。
 
-**遗留待做**：完整 cryptex DDI 资产到位后的 cryptex install 全链路；iOS 27.2 端口迁移
-（二次 announce 攻击路径）专门复现；`display start` 媒体流 server 任务；userspace tunnel
+**遗留待做**：完整 cryptex DDI 资产到位后的 cryptex install 全链路；`display start` 媒体流 server 任务；userspace tunnel
 拨号超时需死路由场景专门触发。
+
+### 2026-11-10（续）遗留项专项验证与 display 任务实现
+
+同一台 iOS 27.2.1 测试 iPhone（`<udid>`），新隔离 home，验证与实现：
+
+| 检查 | 实际结果 | 结论 |
+|---|---|---|
+| cryptex install 全链路（17F113 完整 cryptex 布局，经 ssh 开发用 Mac 获取，SHA-256 校验一致） | 管线机械链路全部执行：cryptex_info 读取/确保未装/read-personalization-id/Cryptex1 identity 匹配(0xFF10)/SHA-384 摘要/**TSS `Cryptex1,Ticket` 请求到达 Apple** → `STATUS=94 This device isn't eligible for the requested build` → 回退 personalized → 17F113 personalized 挂载成功 | passed（Apple 按版本资格拒绝旧 cryptex；27A5194q 世代 cryptex 资产两端皆无——需 Xcode 资产管线，非代码缺口） |
+| 二次 announce 复现（新增 `examples/announce_probe.rs` 探针） | 第二条 RSD 连接被接受、3 消息引导完成、第二次 host announce **发送成功后设备断开连接**；随后 `info display` 旧端口 `failed to connect`（服务已迁移）；`tunnel refresh` 重建后 `info display` 恢复 | passed（iOS 27.2 迁移行为与 go-ios 6910f3b 描述完全一致；反向证明 rust announce-once 保护正确——日常使用每隧道恰一次永不触发） |
+| `display start` server 任务实现 | `TaskKind::DisplayStream` + StreamTaskSpec 扩展（display_id/receiver_port）+ real（displayservice `startmediastream` video/DisplayByID + 内核隧道接口 UDP 接收器 + stopAll）/mock（确定性 RTP 帧 + 单测）/CLI `display start`；`stream_kind_uses_dvt` 第 5 处白名单补齐（真机发现 tunnel 不传递） | userspace 真机路径 passed：任务创建→隧道查找→UDP bind 精确报 `unsupported_platform`（虚拟地址 10049）+ 修复指引，`UnsupportedPlatform`→Failed 不无限重试；内核隧道实时流需管理员环境，待提权验证 |
+
+修复记录：`stream_kind_uses_dvt` 补 `DisplayStream`（重试 24 次不恢复的真机现象定位到此）；探针握手曾误写 2 字节端口（协议为 4 字节 LE），已修。
 
 ### 2026-09-08 go-ios ec90af1 同步（TSS HTTPS + 叶子 sanity check，真机回归待做）
 

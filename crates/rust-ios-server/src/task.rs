@@ -1207,16 +1207,25 @@ impl TaskManager {
                 | TaskKind::Sysmontap,
                 StreamFormat::Raw | StreamFormat::JsonLines,
             )
-            | (TaskKind::Pcap, StreamFormat::Pcap) => {}
+            | (TaskKind::Pcap, StreamFormat::Pcap)
+            // display 媒体流：原始 RTP 帧经 UDP 接收器（同步 go-ios 7e82aa2）。
+            | (TaskKind::DisplayStream, StreamFormat::Raw) => {}
             (
                 TaskKind::Syslog
                 | TaskKind::OsTrace
                 | TaskKind::Notifications
-                | TaskKind::Sysmontap,
+                | TaskKind::Sysmontap
+                | TaskKind::DisplayStream,
                 StreamFormat::Pcap,
             ) => {
                 return Err(CoreError::InvalidArgument(
                     "log streams do not support pcap format".into(),
+                )
+                .into());
+            }
+            (TaskKind::DisplayStream, _) => {
+                return Err(CoreError::InvalidArgument(
+                    "display stream requires raw frame format".into(),
                 )
                 .into());
             }
@@ -1462,6 +1471,7 @@ impl TaskManager {
             TaskSpec::Stream(spec) if spec.output_path.is_none() => {
                 let extension = match spec.kind {
                     TaskKind::Pcap => "pcap",
+                    TaskKind::DisplayStream => "rtp",
                     _ => "log",
                 };
                 let name = format!("{}-{}.{}", spec.kind.as_str(), record.id, extension);
@@ -3635,6 +3645,8 @@ async fn supervise_screenshot_stream(
             process: None,
             os_trace: None,
             watch_kill_targets: None,
+            display_id: None,
+            receiver_port: None,
         };
         let stream = match tunnel {
             Ok(tunnel) => backend.start_stream(&stream_spec, tunnel).await,
@@ -4388,6 +4400,8 @@ fn stream_kind_uses_dvt(kind: &TaskKind) -> bool {
             | TaskKind::Notifications
             | TaskKind::Sysmontap
             | TaskKind::ScreenshotStream
+            // display 媒体流经隧道 RSD 连 displayservice（同步 go-ios 7e82aa2）。
+            | TaskKind::DisplayStream
     )
 }
 
@@ -6848,6 +6862,8 @@ mod tests {
             process: None,
             os_trace: None,
             watch_kill_targets: None,
+            display_id: None,
+            receiver_port: None,
         }
     }
 
