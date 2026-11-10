@@ -39,7 +39,7 @@ fn replay_command_uses_shared_rsd(invocation: &CommandInvocation) -> bool {
         Some("file") => crate::file::has_domain_selector(&invocation.argv),
         Some(
             "ps" | "launch" | "kill" | "memlimitoff" | "devicestate" | "webinspector"
-            | "screenshot" | "setlocation" | "resetlocation",
+            | "screenshot" | "setlocation" | "resetlocation" | "image" | "hid",
         ) => true,
         _ => false,
     }

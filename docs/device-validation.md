@@ -1,4 +1,32 @@
 
+### 2026-11-10 go-ios 65bbc9f 同步真机验证（iOS 27.2.1 测试 iPhone，批次 A–D）
+
+设备：`<udid>`（测试 iPhone / iOS 27.2.1，USB）——正是 go-ios
+`6910f3b`/`65bbc9f` 修复的复现机型。隔离 `--server-home`（temp 目录）+ 动态
+userspace endpoint；对照 go-ios 提交信息中的复现条件。
+
+| 检查 | 实际结果 | 结论 |
+|---|---|---|
+| B2 `rsd ls`（新 announce：先解析后回显） | 85 services 枚举成功；连续多次调用正常，端口不迁移 | passed |
+| B2 `info display`（announce 后的真实服务连接） | deviceinfo 服务返回 6 displays、displayId 1 主屏 828x1792 | passed |
+| A1 `image auto`（ensure-mounted 幂等） | personalized 签名 == dmg SHA-384 → `already-mounted` 幂等返回（两次） | passed |
+| C2 cryptexd 服务发现 | iOS 27.2.1 RSD 广告 `com.apple.security.cryptexd.remote`（连同 screencaptureservice/displayservice/hid.indigo） | passed |
+| C2 cryptex 挂载路径 | cryptexd.remote 命中 → cryptex 路径执行；本地 `ddi-27A5194q` 为不完整 cryptex 布局（缺 `CryptexInfoPlist`/volume 文件）→ 结构化报错 → 回退 personalized → already-mounted；warnings 记录回退原因 | passed（回退语义；完整 cryptex install 需完整 cryptex DDI，待完整资产） |
+| D2 sysmontap JSON v1 帧 | 首行 attributes 帧（procAttrs 8 项/sysAttrs 37 项）+ system 帧（cpuTotalLoad 241.67、systemAttributes 按 sysAttrs 对齐）；processes 帧存在（368+ 进程） | passed |
+| D3 `screenshot --display=1` | `coredevice-screencapture` 模式 4,108,592 bytes，PNG 828x1792；默认 DVT 路径 3,144,412 bytes 同尺寸 | passed |
+| D4 `hid tap 414 300` | hid.indigo 连接、digitizer Start/End 事件发送成功；警告明示无活跃 display 媒体流时事件被设备丢弃（go-ios 同款门槛） | passed（结构级） |
+| D5 `kill --watch com.apple.Preferences` | launch → pid 976 Running 通知命中 → 同连接 processControl `killed:true`；首次真机暴露 bundle-id 匹配缺陷（execName 为 .app 路径），已修（目标解析 CFBundleExecutable + 路径末段/stem 比对 + 单测 2 项） | passed（修复后闭环） |
+| A4 syslog vis 解码 | 2062 行捕获，0 行残留 `\M-` 转义；14 行真实 CJK 文本（CoreData/WDA 中文日志） | passed |
+| 共享 RSD 白名单 | 真机发现 `image`/`hid` 未列入四处白名单导致 tunnel 不传递，已补齐（real/task/replay/mock 四处） | fixed |
+| 清理 | watch/sysmontap/syslog 任务 stopped；隔离 server 进程停止 | passed |
+
+验证中修复的三个缺陷（见提交 2）：共享 RSD 白名单补 `image`/`hid`、cryptex 失败回退
+personalized（go-ios `NewImageMounter` 顺序试语义）、WatchKill 目标解析与路径形态匹配。
+
+**遗留待做**：完整 cryptex DDI 资产到位后的 cryptex install 全链路；iOS 27.2 端口迁移
+（二次 announce 攻击路径）专门复现；`display start` 媒体流 server 任务；userspace tunnel
+拨号超时需死路由场景专门触发。
+
 ### 2026-09-08 go-ios ec90af1 同步（TSS HTTPS + 叶子 sanity check，真机回归待做）
 
 同步 go-ios `main-Attect-dev@ec90af1`：TSS 请求由明文 `http://gs.apple.com` 改为

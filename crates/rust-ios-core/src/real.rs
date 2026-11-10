@@ -1246,7 +1246,9 @@ impl DeviceBackend for IdeviceBackend {
                     }
                 }
             }
-            "image" => command_image(&provider, invocation, tunnel.as_deref()).await?,
+            "image" => {
+                command_image(&provider, invocation, tunnel.as_deref(), &mut warnings).await?
+            }
             "hid" => command_hid(invocation, tunnel.as_deref(), &mut warnings).await?,
             "ps" => {
                 let mut remote = connect_dvt(&provider, tunnel.as_deref()).await?;
@@ -2322,6 +2324,8 @@ async fn start_notifications_stream(
     watch_kill_targets: Option<&[String]>,
 ) -> CoreResult<Box<dyn DeviceStream>> {
     let watch_kill_targets: Vec<String> = watch_kill_targets.unwrap_or(&[]).to_vec();
+    // bundle id → 可执行名解析（go-ios BrowseAllApps→CFBundleExecutable）。
+    let watch_kill_targets = resolve_watch_kill_targets(&provider, &watch_kill_targets).await;
     let service_transport = dvt_service_transport(tunnel.as_ref());
     let (sender, receiver) = mpsc::channel(16);
     let (ready_sender, ready_receiver) = oneshot::channel();
@@ -2374,14 +2378,9 @@ async fn start_notifications_stream(
                     // 命中 WatchKill 目标：先让通知客户端离开作用域（释放 remote
                     // 借用），在同一 remote 上开 processControl 通道秒杀，再恢复
                     // 通知流。
-                    let kill = if notification.state_description.eq_ignore_ascii_case("running") {
-                        watch_kill_targets.iter().enumerate().find(|(_, target)| {
-                            matches_watch_kill_target(&notification, target)
-                        })
-                    } else {
-                        None
-                    };
-                    if let Some((_, target)) = kill {
+                    let kill = matches_watch_kill_target(&notification, &watch_kill_targets)
+                        .cloned();
+                    if let Some(target) = kill {
                         {
                             let mut detached = client.take().expect("notifications client attached");
                             let _ = tokio::time::timeout(
@@ -2694,28 +2693,130 @@ async fn attach_notifications_client(
     Ok(client)
 }
 
-/// WatchKill 目标匹配：目标名与 execName/appName 全名或叶子名（`.` 后段）
-/// 大小写不敏感比对（go-ios 以 CFBundleExecutable 对齐）。
-fn matches_watch_kill_target(
-    notification: &idevice::dvt::notifications::NotificationInfo,
-    target: &str,
-) -> bool {
-    let target = target.trim().to_ascii_lowercase();
-    if target.is_empty() {
-        return false;
+/// 解析 WatchKill 目标（go-ios `BrowseAllApps→CFBundleExecutable`）：bundle id
+/// 经已安装 app 列表映射为可执行名/显示名；原始目标与其 bundle 叶子名也保留。
+/// 枚举失败时退回原始目标本身，保证仍可匹配裸可执行名。
+async fn resolve_watch_kill_targets(provider: &UsbmuxdProvider, targets: &[String]) -> Vec<String> {
+    let mut resolved: Vec<String> = Vec::new();
+    let apps = match idevice::installation_proxy::InstallationProxyClient::connect(provider).await {
+        Ok(mut client) => client.get_apps(Some("Any"), None).await.unwrap_or_default(),
+        Err(_) => Default::default(),
+    };
+    for target in targets {
+        let trimmed = target.trim().to_ascii_lowercase();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if !resolved.contains(&trimmed) {
+            resolved.push(trimmed.clone());
+        }
+        if let Some((_, leaf)) = trimmed.rsplit_once('.')
+            && !resolved.contains(&leaf.to_string())
+        {
+            resolved.push(leaf.to_string());
+        }
+        if let Some(app) = apps.get(target.trim())
+            && let Some(dict) = app.as_dictionary()
+        {
+            for key in ["CFBundleExecutable", "CFBundleDisplayName", "CFBundleName"] {
+                if let Some(name) = dict.get(key).and_then(plist::Value::as_string) {
+                    let name = name.to_ascii_lowercase();
+                    if !resolved.contains(&name) {
+                        resolved.push(name);
+                    }
+                }
+            }
+        }
     }
-    [
-        notification.exec_name.as_str(),
-        notification.app_name.as_str(),
-    ]
-    .iter()
-    .any(|name| {
-        let name = name.trim().to_ascii_lowercase();
-        name == target
-            || name
-                .rsplit_once('.')
-                .is_some_and(|(_, leaf)| leaf == target)
+    resolved
+}
+
+/// WatchKill 目标匹配：目标与通知的 execName/appName（含路径末段与去 `.app`
+/// 后缀的 stem）大小写不敏感比对。返回命中的目标（Running 状态才匹配）。
+fn matches_watch_kill_target<'a>(
+    notification: &idevice::dvt::notifications::NotificationInfo,
+    targets: &'a [String],
+) -> Option<&'a String> {
+    if !notification
+        .state_description
+        .eq_ignore_ascii_case("running")
+    {
+        return None;
+    }
+    let mut candidates = Vec::with_capacity(6);
+    for name in [
+        notification.exec_name.trim().to_ascii_lowercase(),
+        notification.app_name.trim().to_ascii_lowercase(),
+    ] {
+        if name.is_empty() {
+            continue;
+        }
+        candidates.push(name.clone());
+        if let Some((_, leaf)) = name.rsplit_once('/') {
+            candidates.push(leaf.to_string());
+            if let Some(stem) = leaf.strip_suffix(".app") {
+                candidates.push(stem.to_string());
+            }
+        }
+    }
+    targets.iter().find(|target| {
+        let target = target.trim().to_ascii_lowercase();
+        if target.is_empty() {
+            return false;
+        }
+        let target_leaf = target.rsplit_once('.').map(|(_, leaf)| leaf);
+        candidates.iter().any(|candidate| {
+            candidate == &target
+                || target_leaf.is_some_and(|leaf| {
+                    candidate == leaf
+                        || candidate
+                            .rsplit_once('.')
+                            .is_some_and(|(_, candidate_leaf)| candidate_leaf == leaf)
+                })
+        })
     })
+}
+
+#[cfg(test)]
+mod watch_kill_tests {
+    use super::matches_watch_kill_target;
+    use idevice::dvt::notifications::NotificationInfo;
+
+    fn notification(exec_name: &str, app_name: &str, state: &str) -> NotificationInfo {
+        NotificationInfo {
+            notification_type: "applicationStateNotification:".into(),
+            mach_absolute_time: 0,
+            exec_name: exec_name.into(),
+            app_name: app_name.into(),
+            pid: 976,
+            state_description: state.into(),
+        }
+    }
+
+    #[test]
+    fn matches_bundle_leaf_and_executable_stem() {
+        // 真机形态（iOS 27.2 测试 iPhone）：execName 是 .app 路径，appName 是
+        // 显示名；bundle id 目标经解析后的叶子名命中。
+        let notification = notification("/Applications/Preferences.app", "Preferences", "Running");
+        let targets = vec!["preferences".to_string()];
+        assert!(matches_watch_kill_target(&notification, &targets).is_some());
+        // bundle 全名命中目标叶子段（com.apple.Preferences → preferences）。
+        let bundle = vec!["com.apple.preferences".to_string()];
+        assert!(matches_watch_kill_target(&notification, &bundle).is_some());
+        // 裸可执行名也命中。
+        let exec = vec!["Preferences".to_string()];
+        assert!(matches_watch_kill_target(&notification, &exec).is_some());
+        // 非目标不命中。
+        let other = vec!["com.apple.mobilesafari".to_string()];
+        assert!(matches_watch_kill_target(&notification, &other).is_none());
+    }
+
+    #[test]
+    fn only_running_state_matches() {
+        let suspended = notification("/Applications/Preferences.app", "Preferences", "Suspended");
+        let targets = vec!["preferences".to_string()];
+        assert!(matches_watch_kill_target(&suspended, &targets).is_none());
+    }
 }
 
 /// 在同一条 DVT 连接上打开 processControl 通道并秒杀进程（go-ios WatchKill：
@@ -3705,7 +3806,10 @@ fn command_uses_shared_rsd(invocation: &CommandInvocation) -> bool {
         Some("info") => invocation.argv.get(1).map(String::as_str) == Some("display"),
         Some(
             "ps" | "launch" | "kill" | "memlimitoff" | "devicestate" | "webinspector"
-            | "screenshot" | "setlocation" | "resetlocation",
+            | "screenshot" | "setlocation" | "resetlocation"
+            // image：cryptexd 挂载路径需要隧道 RSD（同步 go-ios ca2c56d）。
+            // hid：CoreDevice hid.indigo 需要隧道 RSD（同步 go-ios c584042）。
+            | "image" | "hid",
         ) => true,
         _ => false,
     }
@@ -4490,6 +4594,7 @@ async fn command_image(
     provider: &dyn IdeviceProvider,
     invocation: &CommandInvocation,
     tunnel: Option<&dyn UserSpaceTunnel>,
+    warnings: &mut Vec<String>,
 ) -> CoreResult<Value> {
     let action = invocation.argv.get(1).map(String::as_str).ok_or_else(|| {
         CoreError::InvalidArgument("image requires auto, list, mount or unmount".into())
@@ -4586,11 +4691,33 @@ async fn command_image(
             let board_id = lockdown_unsigned_value(&mut lockdown, "BoardId").await?;
             let chip_id = lockdown_unsigned_value(&mut lockdown, "ChipID").await?;
             // cryptexd.remote 挂载优先（同步 go-ios `NewImageMounter` 组合语义：
-            // cryptex 优先、personalized 兜底）；cryptexd 仅经隧道可达。
-            if let Some(tunnel) = tunnel
+            // Mount 顺序试、第一个成功者胜——cryptex 失败（如本地 DDI 缺 cryptex
+            // 布局文件）回落 personalized）；cryptexd 仅经隧道可达。
+            let mut cryptex_fallback_warning = None;
+            let cryptex_result = if let Some(tunnel) = tunnel
                 && crate::cryptex::supports_cryptex_ddi(tunnel).await
             {
-                return command_image_cryptex(tunnel, invocation, action, board_id, chip_id).await;
+                match command_image_cryptex(tunnel, invocation, action, board_id, chip_id).await {
+                    Ok(value) => Ok(value),
+                    Err(error) => {
+                        cryptex_fallback_warning =
+                            Some(format!("cryptex mount fell back to personalized: {error}"));
+                        Err(error)
+                    }
+                }
+            } else {
+                Err(CoreError::DeviceUnavailable(
+                    "cryptexd.remote is not advertised; using personalized mount".into(),
+                ))
+            };
+            if let Ok(value) = cryptex_result {
+                if let Some(warning) = cryptex_fallback_warning {
+                    warnings.push(warning);
+                }
+                return Ok(value);
+            }
+            if let Some(warning) = cryptex_fallback_warning {
+                warnings.push(warning);
             }
             let unique_chip_id = lockdown_unsigned_value(&mut lockdown, "UniqueChipID").await?;
             let ddi = if action == "auto" {

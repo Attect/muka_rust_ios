@@ -4403,7 +4403,10 @@ fn command_uses_shared_rsd(invocation: &CommandInvocation) -> bool {
         Some("info") => invocation.argv.get(1).map(String::as_str) == Some("display"),
         Some(
             "ps" | "launch" | "kill" | "memlimitoff" | "devicestate" | "webinspector"
-            | "screenshot" | "setlocation" | "resetlocation" | "pasteboard",
+            | "screenshot" | "setlocation" | "resetlocation" | "pasteboard"
+            // image：cryptexd 挂载路径需要隧道 RSD（同步 go-ios ca2c56d）。
+            // hid：CoreDevice hid.indigo 需要隧道 RSD（同步 go-ios c584042）。
+            | "image" | "hid",
         ) => true,
         _ => false,
     }

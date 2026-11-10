@@ -1625,7 +1625,7 @@ fn mock_command_uses_shared_rsd(invocation: &CommandInvocation) -> bool {
         Some("info") => invocation.argv.get(1).map(String::as_str) == Some("display"),
         Some(
             "ps" | "launch" | "kill" | "memlimitoff" | "devicestate" | "webinspector"
-            | "screenshot" | "setlocation" | "resetlocation",
+            | "screenshot" | "setlocation" | "resetlocation" | "image" | "hid",
         ) => true,
         _ => false,
     }
